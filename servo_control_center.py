@@ -19,6 +19,7 @@ HEAD_2 = 0x5A
 
 CMD_TYPE_PING       = 0x01
 CMD_TYPE_SERVO_CTRL = 0x10
+CMD_TYPE_TORQUE     = 0x11
 FB_TYPE_SERVO_INFO  = 0x20
 FB_TYPE_SENSOR_IMU  = 0x30
 FB_TYPE_RL_STATE    = 0x40 
@@ -29,12 +30,13 @@ class SerialManager(threading.Thread):
         self.port = port
         self.log = log_func
         self.latency_cb = latency_cb
-        self.imu_cb = imu_cb
+        self.imu_cb = None 
+        self.latest_imu = None 
         self.ser = None
         self.tx_queue = []
         self.running = True
         self.ping_start_time = 0
-        self.has_received_data = False # 新增：数据接收标志
+        self.has_received_data = False 
         
         try:
             self.ser = serial.Serial(self.port, BAUD_RATE, timeout=0.01, write_timeout=0.1)
@@ -51,6 +53,10 @@ class SerialManager(threading.Thread):
             sid, pos, spd, acc = item
             payload.extend(struct.pack('<B h h B', sid, int(pos), int(spd), int(acc)))
         self.send_raw(CMD_TYPE_SERVO_CTRL, payload)
+
+    def send_torque(self, enable):
+        if not self.ser or not self.running: return
+        self.send_raw(CMD_TYPE_TORQUE, bytearray([1 if enable else 0]))
 
     def send_ping(self):
         if not self.ser or not self.running: return
@@ -72,40 +78,46 @@ class SerialManager(threading.Thread):
                 try: self.ser.write(self.tx_queue.pop(0))
                 except: pass
             
-            # 2. 极速读取 (无 sleep)
+            # 2. 极速读取
             try:
                 waiting = self.ser.in_waiting
                 if waiting > 0:
-                    rx_buffer.extend(self.ser.read(waiting))
+                    raw_data = self.ser.read(waiting)
+                    rx_buffer.extend(raw_data)
                     
-                    # 3. 解析循环
+                    # 解析循环
                     while len(rx_buffer) >= 5:
                         if rx_buffer[0] != HEAD_1 or rx_buffer[1] != HEAD_2:
-                            rx_buffer.pop(0); continue
+                            try:
+                                idx = rx_buffer.index(HEAD_1)
+                                if idx > 0: del rx_buffer[:idx]; continue
+                                else:
+                                    if len(rx_buffer) > 1 and rx_buffer[1] != HEAD_2:
+                                        del rx_buffer[:1]; continue
+                            except ValueError:
+                                rx_buffer.clear(); break
                         
-                        pkt_type = rx_buffer[2]
-                        # 增加长度保护
+                        if len(rx_buffer) < 4: break 
                         pkt_len = rx_buffer[3]
                         total_len = 4 + pkt_len + 1
-                        
-                        if len(rx_buffer) < total_len: break # 数据不够，等下一次
+                        if len(rx_buffer) < total_len: break
                         
                         pkt = rx_buffer[:total_len]
                         if (sum(pkt[:-1]) & 0xFF) == pkt[-1]:
                             payload = pkt[4:4+pkt_len]
+                            pkt_type = pkt[2]
                             
                             if pkt_type == FB_TYPE_SERVO_INFO: self.parse_servo(payload)
                             elif pkt_type == FB_TYPE_SENSOR_IMU: self.parse_imu(payload)
                             elif pkt_type == FB_TYPE_RL_STATE: self.parse_rl_state(payload)
                             elif pkt_type == CMD_TYPE_PING: self.latency_cb((time.perf_counter()-self.ping_start_time)*1000)
                             
-                            rx_buffer = rx_buffer[total_len:]
+                            del rx_buffer[:total_len]
                         else:
-                            rx_buffer.pop(0) # 校验失败
+                            del rx_buffer[:2]
                 else:
-                    time.sleep(0.001) # 只有闲的时候才休息，避免空转烧CPU
+                    time.sleep(0.001) 
             except Exception as e:
-                # self.log(f"RX Error: {e}") # 避免刷屏
                 time.sleep(0.01)
 
     def parse_servo(self, payload):
@@ -123,14 +135,14 @@ class SerialManager(threading.Thread):
         if len(payload) < 36: return
         try:
             data = struct.unpack('<9f', payload[:36])
-            self.imu_cb(data[6], data[7], data[8])
+            self.latest_imu = (data[6], data[7], data[8])
         except: pass
 
     def parse_rl_state(self, payload):
         if len(payload) < 37: return
         try:
             imu_data = struct.unpack('<9f', payload[:36])
-            self.imu_cb(imu_data[6], imu_data[7], imu_data[8])
+            self.latest_imu = (imu_data[6], imu_data[7], imu_data[8])
             
             count = payload[36]
             idx = 37
@@ -157,36 +169,27 @@ class MainApp(tk.Tk):
         self.serial_mgr = None
         self.sliders = {}
         self.fb_labels = {}
-        self.pos_vars = {} 
-        self.sync_pending = False # 待同步标志
+        self.pos_vars = {}
+        self.sync_pending = False 
         
         self.setup_styles()
         self.setup_top_bar()
         self.setup_main_area()
         self.setup_log_area()
         
-        # === 关键修改：绑定关闭事件 ===
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
         self.after(50, self.update_ui_loop)
         self.after(20, self.control_loop)
 
     def on_closing(self):
-        """安全退出程序"""
         self.log("正在关闭程序...")
-        # 1. 停止串口线程
         if self.serial_mgr:
             self.serial_mgr.running = False
             if self.serial_mgr.ser:
-                try:
-                    self.serial_mgr.ser.close()
+                try: self.serial_mgr.ser.close()
                 except: pass
-        
-        # 2. 销毁窗口
         self.destroy()
-        # 3. 强制退出 Python 进程 (防止残留)
-        import os
-        os._exit(0)
+        import os; os._exit(0)
 
     def setup_styles(self):
         style = ttk.Style()
@@ -196,8 +199,11 @@ class MainApp(tk.Tk):
 
     def log(self, msg):
         ts = datetime.now().strftime('%H:%M:%S')
-        self.log_box.insert(tk.END, f"[{ts}] {msg}\n")
-        self.log_box.see(tk.END)
+        if hasattr(self, 'log_box'):
+            self.log_box.insert(tk.END, f"[{ts}] {msg}\n")
+            self.log_box.see(tk.END)
+        else:
+            print(f"[{ts}] {msg}")
 
     def setup_top_bar(self):
         bar = tk.Frame(self, bg="#3c3f41", pady=10, padx=10)
@@ -283,113 +289,106 @@ class MainApp(tk.Tk):
         
         m_frame = tk.Frame(f, bg="#2b2b2b")
         m_frame.pack(side="left", fill="y")
+        
         tk.Button(m_frame, text="手动控制 (MANUAL)", width=20, bg="#444", fg="white", command=lambda: self.set_mode("MANUAL")).pack(pady=2)
-        # 新增粘贴按钮
+        tk.Button(m_frame, text="所有舵机放松 (RELAX)", width=20, bg="#FF9800", fg="black", command=lambda: self.set_mode("RELAX")).pack(pady=2)
+        tk.Button(m_frame, text="所有舵机上锁 (LOCK)", width=20, bg="#4CAF50", fg="white", command=lambda: self.set_mode("MANUAL")).pack(pady=2)
+        tk.Button(m_frame, text="趴下 (LIE DOWN)", width=20, bg="#607D8B", fg="white", command=self.execute_lie_down).pack(pady=2)
         tk.Button(m_frame, text="粘贴并执行 (PASTE)", width=20, bg="#2196F3", fg="white", command=self.paste_and_move).pack(pady=2)
         
         self.lbl_mode = tk.Label(m_frame, text="MODE: MANUAL", font=("Arial", 10, "bold"), fg="#ffeb3b", bg="#2b2b2b")
         self.lbl_mode.pack(pady=5)
-
+        
         self.log_box = scrolledtext.ScrolledText(f, height=6, bg="#1e1e1e", fg="#00ff00", font=("Consolas", 9), relief="flat")
         self.log_box.pack(side="right", fill="both", expand=True, padx=(10, 0))
+
+    def execute_lie_down(self):
+        """执行趴下动作"""
+        targets = {
+            1: 2048, 2: 1073, 3: 3379,
+            4: 2057, 5: 2964, 6: 785,
+            7: 2055, 8: 1077, 9: 3371,
+            10: 2043, 11: 3011, 12: 765
+        }
+        self.log("执行趴下动作...")
+        for sid, pos in targets.items():
+            if sid in self.pos_vars:
+                self.pos_vars[sid].set(pos)
+        self.set_mode("MANUAL")
 
     def toggle_conn(self):
         if self.serial_mgr and self.serial_mgr.running:
             self.serial_mgr.running = False; self.btn_conn.config(text="连接", bg="#4CAF50")
-            self.set_mode("MANUAL") # 断开时重置
+            self.set_mode("MANUAL")
         else:
             p = self.port_combo.get()
             if p:
-                self.serial_mgr = SerialManager(p, self.log, lambda r: self.lbl_latency.config(text=f"延迟: {r:.1f} ms"), 
-                                               lambda r,p,y: self.lbl_imu.config(text=f"IMU: R:{r:>6.2f} P:{p:>6.2f} Y:{y:>6.2f}"))
-                self.serial_mgr.daemon = True # 设置为守护线程
+                self.serial_mgr = SerialManager(p, self.log, lambda r: self.lbl_latency.config(text=f"延迟: {r:.1f} ms"), None)
+                self.serial_mgr.daemon = True 
                 self.serial_mgr.start(); self.btn_conn.config(text="断开", bg="#f44336")
                 
-                # === 关键修改: 进入同步模式 ===
                 self.set_mode("SYNCING")
                 self.sync_pending = True
                 self.log("正在同步舵机位置...")
+                self.after(2000, lambda: self.force_enter_relax_if_stuck())
+
+    def force_enter_relax_if_stuck(self):
+        if CONTROL_MODE == "SYNCING" and self.serial_mgr and self.serial_mgr.running:
+            self.log("[超时] 未收到反馈数据，强制进入放松模式")
+            self.sync_pending = False
+            self.set_mode("RELAX")
+            self.serial_mgr.send_torque(False)
 
     def set_mode(self, m):
         global CONTROL_MODE; CONTROL_MODE = m
         self.lbl_mode.config(text=f"MODE: {m}")
+        if m == "RELAX" and self.serial_mgr:
+            self.serial_mgr.send_torque(False)
+        elif m == "MANUAL" and self.serial_mgr:
+            self.serial_mgr.send_torque(True)
 
     def paste_and_move(self):
-        """利用硬件特性的真·平滑移动"""
         import json
         try:
             content = self.clipboard_get()
             targets = json.loads(content)
-            
-            # 直接把所有变量设为目标值
-            # control_loop 会在下一次循环捕获到这些值，并发送给舵机
             for str_id, pos in targets.items():
                 i = int(str_id)
                 if 1 <= i <= DISPLAY_SERVO_COUNT:
                     self.pos_vars[i].set(pos) 
-            
             self.log(f"指令已下达，硬件自动平滑移动")
-            
         except Exception as e:
             self.log(f"错误: {e}")
 
-    def smooth_move_task(self, targets):
-        """利用舵机内置规划进行丝滑运动"""
-        self.set_mode("MANUAL") 
-        
-        # 1. 准备指令数据
-        # 协议: (sid, pos, speed, acc)
-        # 我们不再切分小步，而是发一条带速度/加速度限制的指令
-        
-        cmd_data = []
-        
-        for sid_str, target in targets.items():
-            sid = int(sid_str)
-            if sid not in self.pos_vars: continue
-            
-            current = self.pos_vars[sid].get()
-            diff = abs(target - current)
-            
-            if diff > 0:
-                # 自适应速度策略 (从配置读取上限)
-                # adaptive_speed = int(diff * 1.5) 
-                adaptive_speed = 500
-                
-                # 加速度: 从配置读取
-                acc = 20
-                
-                cmd_data.append((sid, target, adaptive_speed, acc))
-                
-                # 直接更新 UI 滑块到终点，不再慢慢爬
-                self.pos_vars[sid].set(target)
-        
-        # 2. 发送指令
-        if cmd_data:
-            self.log(f"发送 {len(cmd_data)} 个平滑指令...")
-            self.serial_mgr.send_cmd(cmd_data)
-            
-        self.log("指令已下达")
-
     def update_ui_loop(self):
-        # 1. 检查是否需要执行同步
-        if self.sync_pending and self.serial_mgr and self.serial_mgr.has_received_data:
-            self.log("收到反馈，开始同步滑块...")
-            for i in range(1, DISPLAY_SERVO_COUNT + 1):
-                if i in servo_states:
-                    real_pos = servo_states[i]['pos']
-                    if real_pos > 0: # 过滤无效值
-                        self.pos_vars[i].set(real_pos)
-            self.sync_pending = False
-            self.set_mode("MANUAL") # 同步完成，允许控制
-            self.log("同步完成，控制权已移交 (MANUAL)")
+        if self.serial_mgr:
+            if self.serial_mgr.latest_imu:
+                r, p, y = self.serial_mgr.latest_imu
+                self.lbl_imu.config(text=f"IMU: R:{r:>6.2f} P:{p:>6.2f} Y:{y:>6.2f}")
+                
+            if self.sync_pending and self.serial_mgr.has_received_data:
+                self.log("收到反馈，开始同步滑块...")
+                for i in range(1, DISPLAY_SERVO_COUNT + 1):
+                    if i in servo_states:
+                        real_pos = servo_states[i]['pos']
+                        if real_pos > 0: self.pos_vars[i].set(real_pos)
+                self.sync_pending = False
+                if CONTROL_MODE == "SYNCING":
+                    self.set_mode("RELAX")
+                    self.log("同步完成，自动进入放松状态")
+                    self.after(100, lambda: self.serial_mgr.send_torque(False))
+                else:
+                    self.log("同步完成")
 
-        # 2. 常规 UI 更新
         for i in range(1, DISPLAY_SERVO_COUNT + 1):
             if i in servo_states:
                 st = servo_states[i]
+                if CONTROL_MODE == "RELAX":
+                    real_pos = st['pos']
+                    if real_pos > 0: self.pos_vars[i].set(real_pos)
+
                 lbls = self.fb_labels[i]
                 lbls[0].config(text=str(st['pos']))
-                # lbls[1].config(text=str(st['speed'])) # 空间不够省略速度显示
                 lbls[2].config(text=f"L:{st['load']}")
                 load_val = abs(st['load'])
                 lbls[2].config(fg="#ff4444" if load_val > 500 else "#ffffff")
@@ -397,8 +396,7 @@ class MainApp(tk.Tk):
 
     def control_loop(self):
         if self.serial_mgr and self.serial_mgr.running:
-            # === 关键修改: 如果正在同步，禁止发送指令 ===
-            if CONTROL_MODE == "SYNCING": 
+            if CONTROL_MODE == "SYNCING" or CONTROL_MODE == "RELAX": 
                 self.after(20, self.control_loop)
                 return
 

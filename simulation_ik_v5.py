@@ -26,7 +26,7 @@ class SimApp(tk.Tk):
         
         # Controls
         self.vars = {}
-        self.add_slider(left, "Height", -100, -250, -180)
+        self.add_slider(left, "Height", -30, -250, -180)
         self.add_slider(left, "Pitch", -30, 30, 0)
         self.add_slider(left, "Roll", -30, 30, 0)
         self.add_slider(left, "Yaw", -30, 30, 0)
