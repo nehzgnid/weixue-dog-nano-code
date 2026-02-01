@@ -319,19 +319,23 @@ class MainApp(tk.Tk):
             for sid in self.pos_vars: self.pos_vars[sid].set(2048)
 
     def paste_and_move(self):
-        """从剪贴板读取目标位置并平滑移动"""
+        """利用硬件特性的真·平滑移动"""
         import json
         try:
             content = self.clipboard_get()
             targets = json.loads(content)
-            self.log(f"解析到目标: {len(targets)} 个舵机数据")
             
-            # 启动平滑移动线程
-            threading.Thread(target=self.smooth_move_task, args=(targets,), daemon=True).start()
+            # 直接把所有变量设为目标值
+            # control_loop 会在下一次循环捕获到这些值，并发送给舵机
+            for str_id, pos in targets.items():
+                i = int(str_id)
+                if 1 <= i <= DISPLAY_SERVO_COUNT:
+                    self.pos_vars[i].set(pos) 
+            
+            self.log(f"指令已下达，硬件自动平滑移动")
             
         except Exception as e:
-            self.log(f"粘贴失败: {e}")
-            messagebox.showerror("Error", f"剪贴板数据无效:\n{e}")
+            self.log(f"错误: {e}")
 
     def smooth_move_task(self, targets):
         """利用舵机内置规划进行丝滑运动"""
@@ -352,11 +356,11 @@ class MainApp(tk.Tk):
             
             if diff > 0:
                 # 自适应速度策略 (从配置读取上限)
-                adaptive_speed = int(diff * 1.5) 
-                adaptive_speed = 10
+                # adaptive_speed = int(diff * 1.5) 
+                adaptive_speed = 500
                 
                 # 加速度: 从配置读取
-                acc = cfg.ACCELERATION
+                acc = 20
                 
                 cmd_data.append((sid, target, adaptive_speed, acc))
                 
@@ -405,7 +409,7 @@ class MainApp(tk.Tk):
             data = []
             if CONTROL_MODE == "MANUAL":
                 for i in range(1, DISPLAY_SERVO_COUNT + 1):
-                    data.append((i, self.pos_vars[i].get(), 0, 0))
+                    data.append((i, self.pos_vars[i].get(),500, 20))
             elif CONTROL_MODE == "SINE":
                 t = time.time() * 2
                 for i in range(1, DISPLAY_SERVO_COUNT + 1):

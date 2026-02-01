@@ -8,7 +8,7 @@
     },
     "offsets": {
         "hip": -8.6,
-        "knee": -15.3
+        "knee": -20.3
     },
     "limits": {
         "abd": [1800, 2300],
@@ -30,7 +30,7 @@
         "12": 1
     },
     "motion": {
-        "speed_limit": 100,
+        "speed_limit": 500,
         "acceleration": 20
     }
 }
