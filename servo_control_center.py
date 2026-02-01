@@ -284,8 +284,6 @@ class MainApp(tk.Tk):
         m_frame = tk.Frame(f, bg="#2b2b2b")
         m_frame.pack(side="left", fill="y")
         tk.Button(m_frame, text="手动控制 (MANUAL)", width=20, bg="#444", fg="white", command=lambda: self.set_mode("MANUAL")).pack(pady=2)
-        tk.Button(m_frame, text="正弦波测试 (SINE)", width=20, bg="#444", fg="white", command=lambda: self.set_mode("SINE")).pack(pady=2)
-        tk.Button(m_frame, text="全局复位 (RESET)", width=20, bg="#800", fg="white", command=lambda: self.set_mode("RESET")).pack(pady=2)
         # 新增粘贴按钮
         tk.Button(m_frame, text="粘贴并执行 (PASTE)", width=20, bg="#2196F3", fg="white", command=self.paste_and_move).pack(pady=2)
         
@@ -315,8 +313,6 @@ class MainApp(tk.Tk):
     def set_mode(self, m):
         global CONTROL_MODE; CONTROL_MODE = m
         self.lbl_mode.config(text=f"MODE: {m}")
-        if m == "RESET":
-            for sid in self.pos_vars: self.pos_vars[sid].set(2048)
 
     def paste_and_move(self):
         """利用硬件特性的真·平滑移动"""
@@ -410,12 +406,6 @@ class MainApp(tk.Tk):
             if CONTROL_MODE == "MANUAL":
                 for i in range(1, DISPLAY_SERVO_COUNT + 1):
                     data.append((i, self.pos_vars[i].get(),500, 20))
-            elif CONTROL_MODE == "SINE":
-                t = time.time() * 2
-                for i in range(1, DISPLAY_SERVO_COUNT + 1):
-                    pos = 2048 + 800 * math.sin(t + i*0.4)
-                    self.pos_vars[i].set(int(pos))
-                    data.append((i, int(pos), 0, 0))
             self.serial_mgr.send_cmd(data)
         self.after(20, self.control_loop)
 

@@ -67,6 +67,7 @@ class LegKinematics:
         pwm_hip = 2048 + (q_hip - OFFSET_HIP) * self.rad_to_step * self.dir_hip
         pwm_knee = 2048 + (q_knee - OFFSET_KNEE) * self.rad_to_step * self.dir_knee
         
+        
         # 限幅 (从配置读取)
         limits = cfg.LIMITS
         pwm_abd = np.clip(pwm_abd, *limits["abd"])

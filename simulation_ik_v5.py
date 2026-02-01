@@ -151,7 +151,7 @@ class SimApp(tk.Tk):
                 raw_pwm_abd = 2048 + (q1 - 0) * kin.rad_to_step * kin.dir_abd
                 raw_pwm_hip = 2048 + (q2 - OFFSET_HIP) * kin.rad_to_step * kin.dir_hip
                 raw_pwm_knee = 2048 + (q3 - OFFSET_KNEE) * kin.rad_to_step * kin.dir_knee
-                
+                print(f"offsets: hip {OFFSET_HIP * 180/np.pi}, knee {OFFSET_KNEE * 180/np.pi}")
                 pwms = [int(raw_pwm_abd), int(raw_pwm_hip), int(raw_pwm_knee)]
                 limits = [(1800, 2300), (1200, 2900), (850, 3250)]
                 
