@@ -652,50 +652,45 @@ class TrotControlFrame(tk.Frame):
             ph = (global_phase + phase_offsets[name]) % 1.0
             
             x_g, z_g = 0, 0
+            current_acc = 0 # Default max acc
             
             # Generalized Gait Logic
             if ph < swing_duration: 
-                # Swing
+                # Swing Phase
                 swing_p = ph / swing_duration
                 x_g, z_g = self.gait.get_swing_pos(swing_p, step_l, current_step_h)
+                current_acc = 0 # High responsiveness for swing
             else: 
-                # Stance
+                # Stance Phase
                 stance_p = (ph - swing_duration) / (1.0 - swing_duration)
                 x_g, z_g = self.gait.get_stance_pos(stance_p, step_l)
                 
-                # Soft Landing Cushion (Exponential Decay)
-                # Adds positive Z (lift) at start of stance to reduce impact
-                if stance_p < 0.2:
-                    decay = (0.2 - stance_p) / 0.2
+                # Soft Landing Cushion
+                if stance_p < 0.15:
+                    decay = (0.15 - stance_p) / 0.15
                     z_g += cushion_amp * decay
+                    # Reduce Acc during landing to dampen impact
+                    current_acc = 40 
+                else:
+                    current_acc = 0
             
             # Combine
             z_bal = -bal_offsets[name] 
             
             # 1. Base Pos relative to Hip
             tx = x_g + COG_X
-            ty = kin.side_sign * cfg.L1 + cog_y_dynamic # Apply Body Shift
+            ty = kin.side_sign * cfg.L1 + cog_y_dynamic
             tz = body_h + z_g + z_bal
             
-            # 2. Yaw Rotation
+            # 2. Yaw Rotation (Optional Balance)
             if bal_en and yaw_corr_rad != 0:
-                # Convert to Body Frame (Center of Robot)
-                # Hip Offset from Center
                 hip_x = cfg.LENGTH / 2.0 if "F" in name else -cfg.LENGTH / 2.0
                 hip_y = cfg.WIDTH / 2.0 if "L" in name else -cfg.WIDTH / 2.0
-                
-                # Current Target in Body Frame
                 bx = hip_x + tx
                 by = hip_y + ty
-                
-                # Rotate (Inverse rotation of Body = Rotation of Foot)
-                # If Body rotates +Yaw, Feet must rotate -Yaw relative to Body to stay planted.
-                # So we rotate by -yaw_corr_rad
                 c, s = math.cos(-yaw_corr_rad), math.sin(-yaw_corr_rad)
                 bx_new = bx * c - by * s
                 by_new = bx * s + by * c
-                
-                # Convert back to Hip Frame
                 tx = bx_new - hip_x
                 ty = by_new - hip_y
 
@@ -703,9 +698,12 @@ class TrotControlFrame(tk.Frame):
             if res:
                 q = kin.rad_to_pwm(*res)
                 ids = self.leg_ids[name]
-                cmds.append((ids[0], q[0], 0, 0))
-                cmds.append((ids[1], q[1], 0, 0))
-                cmds.append((ids[2], q[2], 0, 0))
+                # Use a small Time (20ms) to allow servo internal smoothing 
+                # between Python update cycles.
+                t_smooth = 20 
+                cmds.append((ids[0], q[0], t_smooth, 0, current_acc))
+                cmds.append((ids[1], q[1], t_smooth, 0, current_acc))
+                cmds.append((ids[2], q[2], t_smooth, 0, current_acc))
                 
         self.ctx.io.send_servos(cmds)
         
