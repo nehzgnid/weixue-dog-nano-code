@@ -25,14 +25,27 @@ class SharedContext:
     def __init__(self):
         self.io = RobotIO() 
         self.running = True
-        self.mode = "RELAX" # Default to RELAX to prevent jerk on startup
+        self.mode = "RELAX"
         self.log_callback = None
+        # IMU Offset for zeroing
+        self.imu_offsets = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0}
     
     def log(self, msg):
-        if self.log_callback:
-            self.log_callback(msg)
-        else:
-            print(f"[Context] {msg}")
+        if self.log_callback: self.log_callback(msg)
+        else: print(f"[Context] {msg}")
+
+    def get_corrected_imu(self):
+        raw = self.io.get_imu()
+        return {
+            'roll': raw['roll'] - self.imu_offsets['roll'],
+            'pitch': raw['pitch'] - self.imu_offsets['pitch'],
+            'yaw': raw['yaw'] - self.imu_offsets['yaw']
+        }
+
+    def zero_imu(self):
+        raw = self.io.get_imu()
+        self.imu_offsets = raw.copy()
+        self.log("IMU Zeroed at current orientation.")
 
 class ManualControlFrame(tk.Frame):
     def __init__(self, parent, context):
@@ -500,6 +513,9 @@ class TrotControlFrame(tk.Frame):
                                   bg="#4CAF50", fg="white", font=("Arial", 12, "bold"), width=15)
         self.btn_start.pack(side="left", padx=10)
         
+        tk.Button(btn_f, text="Zero IMU", command=self.ctx.zero_imu, 
+                 bg="#9E9E9E", fg="white", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+
         tk.Button(btn_f, text="Emergency Stop", command=self.emergency_stop, 
                  bg="#f44336", fg="white", font=("Arial", 12, "bold")).pack(side="right", padx=10)
 
@@ -564,8 +580,8 @@ class TrotControlFrame(tk.Frame):
         self.running_trot = True
         self.start_time = time.perf_counter()
         
-        # Initialize Yaw Target
-        imu = self.ctx.io.get_imu()
+        # Initialize Yaw Target (Use Corrected orientation)
+        imu = self.ctx.get_corrected_imu()
         self.target_yaw = imu['yaw']
         self.balance.pid_yaw.reset()
         
@@ -589,7 +605,7 @@ class TrotControlFrame(tk.Frame):
 
     def update_imu_display(self):
         if self.running_trot:
-            imu = self.ctx.io.get_imu()
+            imu = self.ctx.get_corrected_imu()
             self.lbl_imu_roll.config(text=f"Roll: {imu['roll']:.2f}")
             self.lbl_imu_pitch.config(text=f"Pitch: {imu['pitch']:.2f}")
         self.after(100, self.update_imu_display)
@@ -620,8 +636,8 @@ class TrotControlFrame(tk.Frame):
         # Soft Start (Ramp height)
         current_step_h = min(step_h, step_h * (elapsed / 2.0))
         
-        # IMU & Yaw Correction
-        imu = self.ctx.io.get_imu()
+        # IMU & Yaw Correction (Using Corrected Angles)
+        imu = self.ctx.get_corrected_imu()
         yaw_corr_rad = 0.0
         
         bal_offsets = {"FL":0, "FR":0, "RL":0, "RR":0}
