@@ -4,6 +4,7 @@ import threading
 import time
 import struct
 import queue
+from robot_config import cfg
 
 # Protocol Constants
 HEAD_1 = 0xA5
@@ -87,11 +88,17 @@ class RobotIO:
                     sid, pos, spd, acc = item
                     time_val = 0 
                 
+                # Debug: Check for invalid values before packing
+                if not (0 <= int(sid) <= 255):
+                    print(f"[DEBUG] Invalid SID: {sid} (type: {type(sid)})")
+                if not (0 <= int(acc) <= 255):
+                    print(f"[DEBUG] Invalid ACC: {acc} (type: {type(acc)}, item: {item})")
+                
                 # Format: < (little), B(ID), B(Acc), h(Pos), H(Time), H(Spd)
-                # Ensure all values are within uint8/int16/uint16 limits
                 u_sid = max(0, min(255, int(sid)))
                 u_acc = max(0, min(255, int(acc)))
-                i_pos = max(-32768, min(32767, int(pos)))
+                calibrated_pos = int(pos) + cfg.get_offset(u_sid)
+                i_pos = max(-32768, min(32767, calibrated_pos))
                 u_time = max(0, min(65535, int(time_val)))
                 u_spd = max(0, min(65535, int(spd)))
                 
@@ -99,6 +106,7 @@ class RobotIO:
             self._send_packet(CMD_TYPE_SERVO_CTRL, payload)
         except Exception as e:
             print(f"[RobotIO] Send Servo Error: {e}")
+            print(f"[RobotIO] Debug - First item: {servo_data_list[0] if servo_data_list else 'EMPTY'}")
 
     def get_imu(self):
         with self.lock:
