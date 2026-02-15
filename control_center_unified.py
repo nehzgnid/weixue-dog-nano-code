@@ -135,8 +135,17 @@ class ManualControlFrame(tk.Frame):
         self.ctx.log("Mode: MANUAL (Torque ON)")
 
     def sync_sliders(self):
-        # Not fully implemented in IO yet, but placeholder
-        pass
+        """Alings sliders to actual hardware positions to prevent sudden jumps."""
+        states = self.ctx.io.get_servo_states()
+        count = 0
+        for sid, data in states.items():
+            if sid in self.pos_vars:
+                self.pos_vars[sid].set(data['pos'])
+                count += 1
+        if count > 0:
+            self.ctx.log(f"Synced {count} sliders from hardware.")
+        else:
+            self.ctx.log("Sync failed: No servo feedback data received yet.")
 
     def relax_all(self):
         self.ctx.mode = "RELAX"
@@ -315,8 +324,20 @@ class ManualControlFrame(tk.Frame):
         self.after(20, self.control_loop)
 
     def update_ui_loop(self):
-        # Update Feedback Labels (if IO supported reading back positions easily)
-        # Assuming robot_io updates servo_states someday
+        # Update Feedback Labels from current IO state
+        states = self.ctx.io.get_servo_states()
+        for sid, data in states.items():
+            if sid in self.fb_labels:
+                pos = data.get('pos', 0)
+                self.fb_labels[sid].config(text=f"{pos:04d}")
+                # Colorize based on deviation from target
+                target = self.pos_vars[sid].get()
+                error = abs(target - pos)
+                if error > 50:
+                    self.fb_labels[sid].config(fg="#ff5252") # Red if laggy
+                else:
+                    self.fb_labels[sid].config(fg="#00e676") # Green if accurate
+        
         self.after(100, self.update_ui_loop)
 
 class TestLabFrame(tk.Frame):

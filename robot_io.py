@@ -152,19 +152,30 @@ class RobotIO:
         try:
             data = struct.unpack('<9f', payload[:36])
             with self.lock:
-                # Basic Low-Pass Filter (Simple Exponential Smoothing)
-                alpha = 0.2  # Smoothing factor (0 < alpha < 1). Lower = more smooth, higher = faster response.
-                
-                raw_roll = data[6]
-                raw_pitch = data[7]
-                raw_yaw = data[8]
-                
-                self.imu_data['roll'] = self.imu_data['roll'] * (1 - alpha) + raw_roll * alpha
-                self.imu_data['pitch'] = self.imu_data['pitch'] * (1 - alpha) + raw_pitch * alpha
-                self.imu_data['yaw'] = self.imu_data['yaw'] * (1 - alpha) + raw_yaw * alpha
-                
-        except Exception:
-            pass
+                alpha = 0.2
+                self.imu_data['roll'] = self.imu_data['roll'] * (1 - alpha) + data[6] * alpha
+                self.imu_data['pitch'] = self.imu_data['pitch'] * (1 - alpha) + data[7] * alpha
+                self.imu_data['yaw'] = self.imu_data['yaw'] * (1 - alpha) + data[8] * alpha
+        except: pass
 
     def _parse_rl_state(self, payload):
-        self._parse_imu(payload)
+        # Format: IMU(36) + Count(1) + [ID(1)+Pos(2)+Spd(2)+Load(2)](7 * Count)
+        if len(payload) < 37: return
+        try:
+            # 1. Parse IMU part
+            self._parse_imu(payload[:36])
+            
+            # 2. Parse Servos
+            count = payload[36]
+            offset = 37
+            with self.lock:
+                for _ in range(count):
+                    if offset + 7 > len(payload): break
+                    sid, pos, spd, load = struct.unpack('<B h h h', payload[offset:offset+7])
+                    self.servo_states[sid] = {'pos': pos, 'speed': spd, 'load': load}
+                    offset += 7
+        except: pass
+
+    def get_servo_states(self):
+        with self.lock:
+            return self.servo_states.copy()
