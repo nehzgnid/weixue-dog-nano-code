@@ -57,9 +57,11 @@ class ManualControlFrame(tk.Frame):
         self.servo_states = {i: {'pos': 2048, 'speed': 0, 'load': 0} for i in range(1, 32)}
         
         # Global Parameters for Native Control
+        # IMPORTANT: Speed Limit must be > 0 (e.g., 3400) when using Time mode!
+        # Speed=0 is interpreted by servo as "unlimited/instant" and ignores Time.
         self.global_vars = {
             "Time (ms)": tk.IntVar(value=0),
-            "Speed Limit": tk.IntVar(value=0),
+            "Speed Limit": tk.IntVar(value=3400),  # ST3215 max speed, allows Time to work
             "Acceleration": tk.IntVar(value=0),
             "Use Native Timing": tk.BooleanVar(value=True)
         }
@@ -93,6 +95,9 @@ class ManualControlFrame(tk.Frame):
         for name in ["Time (ms)", "Speed Limit", "Acceleration"]:
             tk.Label(param_f, text=name+":", bg="#3c3f41", fg="#eee").pack(side="left", padx=2)
             tk.Entry(param_f, textvariable=self.global_vars[name], width=6, bg="#1e1e1e", fg="#00ff00").pack(side="left", padx=5)
+        
+        tk.Button(param_f, text="Save All Offsets", command=self.save_all_offsets, 
+                 bg="#2196F3", fg="white").pack(side="right", padx=10)
         
         # Scrollable Area
         canvas = tk.Canvas(self, bg="#2b2b2b", highlightthickness=0)
@@ -130,10 +135,31 @@ class ManualControlFrame(tk.Frame):
         entry.pack(side="left", padx=5)
         entry.bind("<Return>", lambda e, s=sid, en=entry: self.on_entry_set(s, en))
         
+        # Calibration Offset Entry
+        tk.Label(row, text="Off:", bg="#323232", fg="#aaa", font=("Arial", 9)).pack(side="left", padx=2)
+        off_var = tk.IntVar(value=cfg.get_offset(sid))
+        off_entry = tk.Entry(row, width=4, font=("Consolas", 10), bg="#2b2b2b", fg="#ff9800", textvariable=off_var)
+        off_entry.pack(side="left", padx=2)
+        off_entry.bind("<Return>", lambda e, s=sid, v=off_var: self.on_offset_set(s, v))
+
         # Feedback
         l_pos = tk.Label(row, text="----", font=("Consolas", 10), fg="white", bg="#323232", width=5)
         l_pos.pack(side="right", padx=2)
         self.fb_labels[sid] = l_pos
+
+    def on_offset_set(self, sid, var):
+        try:
+            val = var.get()
+            cfg.set_offset(sid, val)
+            self.ctx.log(f"Set Offset for ID {sid}: {val} (Click 'Save All' to persist)")
+        except: pass
+
+    def save_all_offsets(self):
+        try:
+            cfg.save()
+            self.ctx.log("All offsets saved to config.json successfully!")
+        except Exception as e:
+            self.ctx.log(f"Failed to save offsets: {e}")
 
     def on_entry_set(self, sid, entry):
         try:
@@ -737,10 +763,13 @@ class TrotControlFrame(tk.Frame):
                 ids = self.leg_ids[name]
                 # Use a small Time (20ms) to allow servo internal smoothing 
                 # between Python update cycles.
+                # IMPORTANT: Speed must be > 0 (e.g., 3400 max) for Time to take effect!
+                # Speed=0 may be interpreted as "unlimited/instant" by servo firmware.
                 t_smooth = 20 
-                cmds.append((ids[0], q[0], t_smooth, 0, current_acc))
-                cmds.append((ids[1], q[1], t_smooth, 0, current_acc))
-                cmds.append((ids[2], q[2], t_smooth, 0, current_acc))
+                max_spd = 3400  # ST3215 max speed
+                cmds.append((ids[0], q[0], t_smooth, max_spd, current_acc))
+                cmds.append((ids[1], q[1], t_smooth, max_spd, current_acc))
+                cmds.append((ids[2], q[2], t_smooth, max_spd, current_acc))
                 
         self.ctx.io.send_servos(cmds)
         

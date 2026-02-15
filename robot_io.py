@@ -102,6 +102,13 @@ class RobotIO:
                 u_time = max(0, min(65535, int(time_val)))
                 u_spd = max(0, min(65535, int(spd)))
                 
+                # CRITICAL FIX: If Time>0 but Speed=0, servo may ignore Time and move instantly!
+                # Auto-correct Speed to max (3400) to ensure Time takes effect.
+                if u_time > 0 and u_spd == 0:
+                    print(f"[WARN] ID {u_sid}: Time={u_time}ms but Speed=0. Speed=0 disables Time mode!")
+                    print(f"[WARN] Auto-setting Speed to 3400 to allow Time-based motion.")
+                    u_spd = 3400  # ST3215 max speed
+                
                 payload.extend(struct.pack('<B B h H H', u_sid, u_acc, i_pos, u_time, u_spd))
             self._send_packet(CMD_TYPE_SERVO_CTRL, payload)
         except Exception as e:
