@@ -78,10 +78,17 @@ class RobotIO:
             count = len(servo_data_list)
             payload = bytearray([count])
             for item in servo_data_list:
-                sid, pos, spd, acc = item
-                # Updated to use 2-byte Acceleration (unsigned short 'H')
-                # Format: ID(1) + Pos(2) + Speed(2) + Acc(2) = 7 bytes
-                payload.extend(struct.pack('<B h h H', sid, int(pos), int(spd), int(acc)))
+                # New Protocol: ID(1), Acc(1), Pos(2), Time(2), Speed(2)
+                # item can be (id, pos, time, speed, acc)
+                if len(item) == 5:
+                    sid, pos, time_val, spd, acc = item
+                else:
+                    # Backward compatibility for (id, pos, spd, acc)
+                    sid, pos, spd, acc = item
+                    time_val = 0 # Default to 0
+                
+                # Format: < (little endian), B(uint8), B(uint8), h(int16), H(uint16), H(uint16)
+                payload.extend(struct.pack('<B B h H H', sid, int(acc), int(pos), int(time_val), int(spd)))
             self._send_packet(CMD_TYPE_SERVO_CTRL, payload)
         except Exception as e:
             print(f"[RobotIO] Send Servo Error: {e}")
