@@ -168,3 +168,27 @@ class RobotIO:
 
     def _parse_rl_state(self, payload):
         self._parse_imu(payload)
+        if len(payload) < 37: return
+        
+        count = payload[36]
+        servo_data = payload[37:]
+        # Each servo is 11 bytes: ID(B), Pos(h), Spd(h), Load(h), Current(h), Volt(B), Temp(B)
+        servo_size = 11
+        if len(servo_data) < count * servo_size: return
+        
+        new_states = {}
+        for i in range(count):
+            base = i * servo_size
+            chunk = servo_data[base : base + servo_size]
+            sid, pos, spd, load, curr, volt, temp = struct.unpack('<BhhhhBB', chunk)
+            new_states[sid] = {
+                'pos': pos,
+                'spd': spd,
+                'load': load,
+                'current': curr,
+                'voltage': volt,
+                'temp': temp
+            }
+        
+        with self.lock:
+            self.servo_states.update(new_states)

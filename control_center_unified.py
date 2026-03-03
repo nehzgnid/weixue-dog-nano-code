@@ -41,7 +41,7 @@ class ManualControlFrame(tk.Frame):
         self.sliders = {}
         self.fb_labels = {}
         self.pos_vars = {}
-        self.servo_states = {i: {'pos': 2048, 'speed': 0, 'load': 0} for i in range(1, 32)}
+        self.servo_states = {i: {'pos': 2048, 'spd': 0, 'load': 0, 'current': 0, 'voltage': 0, 'temp': 0} for i in range(1, 32)}
         
         # Global Parameters for Native Control
         self.global_vars = {
@@ -51,6 +51,12 @@ class ManualControlFrame(tk.Frame):
             "Use Native Timing": tk.BooleanVar(value=True)
         }
         
+        # Action Keyframes
+        self.POSE_SIT = {"1": 1995, "2": 1170, "3": 2122, "4": 2111, "5": 2855, "6": 1888, "7": 2000, "8": 3848, "9": 3506, "10": 2055, "11": 261, "12": 610}
+        self.POSE_BOW_1 = {"1": 2534, "2": 1594, "3": 2352, "4": 1785, "5": 2535, "6": 1662, "7": 2000, "8": 3774, "9": 3506, "10": 2058, "11": 353, "12": 610}
+        self.POSE_BOW_2 = {"1": 2535, "2": 1227, "3": 1980, "4": 1719, "5": 2937, "6": 2065, "7": 2000, "8": 3768, "9": 3506, "10": 2059, "11": 357, "12": 610}
+        self.POSE_STAND = {"1": 2048, "2": 1527, "3": 2273, "4": 2048, "5": 2568, "6": 1822, "7": 2048, "8": 1527, "9": 2273, "10": 2048, "11": 2568, "12": 1822}
+
         self.setup_ui()
         self.after(50, self.update_ui_loop)
         self.after(20, self.control_loop)
@@ -68,7 +74,15 @@ class ManualControlFrame(tk.Frame):
         tk.Button(btn_f, text="Sync From Hardware", command=self.sync_sliders, bg="#2196F3", fg="white").pack(side="left", padx=5)
         tk.Button(btn_f, text="Lie Down", command=self.lie_down, bg="#607D8B", fg="white").pack(side="left", padx=5)
         tk.Button(btn_f, text="Stand Up", command=self.stand_up, bg="#8BC34A", fg="white").pack(side="left", padx=5)
+        tk.Button(btn_f, text="Copy PWM", command=self.copy_pwm, bg="#00BCD4", fg="white").pack(side="left", padx=5)
         tk.Button(btn_f, text="Paste & Move", command=self.paste_and_move, bg="#9C27B0", fg="white").pack(side="left", padx=5)
+        
+        # Action Presets
+        tk.Label(btn_f, text="Action:", bg="#3c3f41", fg="#eee").pack(side="left", padx=10)
+        self.action_combo = ttk.Combobox(btn_f, values=["None", "Sit Down Only", "Bow Only (3x)", "Happy New Year 🧨"], width=18)
+        self.action_combo.current(0)
+        self.action_combo.pack(side="left", padx=2)
+        self.action_combo.bind("<<ComboboxSelected>>", self.on_action_select)
         
         # Row 2: Native Control Params
         param_f = tk.Frame(top, bg="#3c3f41", pady=5)
@@ -117,10 +131,180 @@ class ManualControlFrame(tk.Frame):
         entry.pack(side="left", padx=5)
         entry.bind("<Return>", lambda e, s=sid, en=entry: self.on_entry_set(s, en))
         
-        # Feedback
-        l_pos = tk.Label(row, text="----", font=("Consolas", 10), fg="white", bg="#323232", width=5)
-        l_pos.pack(side="right", padx=2)
-        self.fb_labels[sid] = l_pos
+        # Feedback container
+        fb_f = tk.Frame(row, bg="#323232")
+        fb_f.pack(side="right", padx=2)
+        
+        self.fb_labels[sid] = {
+            'pos': tk.Label(fb_f, text="P:----", font=("Consolas", 9), fg="#00ff00", bg="#323232", width=7),
+            'spd': tk.Label(fb_f, text="S:----", font=("Consolas", 9), fg="#00ffff", bg="#323232", width=7),
+            'curr': tk.Label(fb_f, text="I:----", font=("Consolas", 9), fg="#ff5722", bg="#323232", width=7),
+            'volt': tk.Label(fb_f, text="V:--", font=("Consolas", 9), fg="#ffeb3b", bg="#323232", width=5),
+            'temp': tk.Label(fb_f, text="T:--", font=("Consolas", 9), fg="#f44336", bg="#323232", width=5),
+        }
+        for lbl in self.fb_labels[sid].values():
+            lbl.pack(side="left", padx=1)
+
+    def on_action_select(self, event):
+        val = self.action_combo.get()
+        if val == "Sit Down Only":
+             if messagebox.askyesno("Confirm Action", "Robot will SIT DOWN immediately.\nEnsure space is clear!"):
+                threading.Thread(target=self.run_sit_only, daemon=True).start()
+        elif val == "Bow Only (3x)":
+             if messagebox.askyesno("Confirm Action", "Robot will BOW 3 times.\nEnsure it is already SITTING!"):
+                threading.Thread(target=self.run_bow_only, daemon=True).start()
+        elif val == "Happy New Year 🧨":
+            # Confirm
+            if messagebox.askyesno("Confirm Action", "Robot will move immediately.\nEnsure space is clear!"):
+                threading.Thread(target=self.run_new_year_sequence, daemon=True).start()
+        self.action_combo.current(0) # Reset to None
+
+    def _internal_move_to(self, target_pose, duration_sec):
+        """Helper for blocking smooth move with 1000 speed limit"""
+        steps = int(duration_sec * 50) # 50Hz
+        if steps < 1: steps = 1
+        
+        # Capture start from current sliders/feedback
+        start_pose = {}
+        with self.ctx.io.lock:
+            states = self.ctx.io.servo_states.copy()
+        
+        for sid_str in target_pose.keys():
+            sid = int(sid_str)
+            if sid in states and 'pos' in states[sid] and states[sid]['pos'] > 0:
+                start_pose[sid] = states[sid]['pos']
+            elif sid in self.pos_vars:
+                start_pose[sid] = self.pos_vars[sid].get()
+            else:
+                start_pose[sid] = 2048
+
+        self.manual_lockout_until = time.perf_counter() + duration_sec + 0.2
+        
+        for step in range(1, steps + 1):
+            t = step / steps
+            t_eased = t * t * (3 - 2 * t)
+            
+            cmds = []
+            for sid_str, target in target_pose.items():
+                sid = int(sid_str)
+                start = start_pose.get(sid, 2048)
+                
+                diff = target - start
+                if diff > 2048: diff -= 4096
+                elif diff < -2048: diff += 4096
+                
+                val = start + diff * t_eased
+                
+                # CRITICAL FIX: Do NOT modulo 4096. 
+                # Allow values > 4095 or < 0 to ensure boundary crossing (Shortest Path).
+                # This requires servos to support multi-turn coordinates or relative moves.
+                current_target = int(val)
+                
+                if sid in self.pos_vars:
+                    # For slider display, we DO modulo to keep it readable
+                    self.pos_vars[sid].set(current_target % 4096)
+                
+                cmds.append((sid, current_target, 0, 1000, 0))
+            
+            self.ctx.io.send_servos(cmds)
+            time.sleep(0.02)
+
+    def run_sit_only(self):
+        self.ctx.mode = "MANUAL"
+        self.ctx.io.send_torque(True)
+        self.ctx.log("Executing Sit Down Only...")
+        try:
+            self._internal_move_to(self.POSE_SIT, 2.0)
+            self.ctx.log("Sit Down Complete.")
+        except Exception as e:
+            self.ctx.log(f"Sit Error: {e}")
+
+    def run_bow_only(self):
+        self.ctx.mode = "MANUAL"
+        self.ctx.io.send_torque(True)
+        self.ctx.log("Executing Bow Sequence (3x)...")
+        
+        # Helper to lock rear legs to SIT position
+        def merge_rear_legs_from_sit(target_pose):
+            new_pose = target_pose.copy()
+            # Rear Legs IDs: 7,8,9 (RL) and 10,11,12 (RR)
+            for i in range(7, 13):
+                sid_str = str(i)
+                if sid_str in self.POSE_SIT:
+                    new_pose[sid_str] = self.POSE_SIT[sid_str]
+            return new_pose
+
+        try:
+            # Prepare poses with locked rear legs
+            bow_1_locked = merge_rear_legs_from_sit(self.POSE_BOW_1)
+            bow_2_locked = merge_rear_legs_from_sit(self.POSE_BOW_2)
+            
+            # 1. Move to Bow 1
+            self.ctx.log("Step 1: Ready Bow")
+            self._internal_move_to(bow_1_locked, 1.0)
+            
+            # 2. Loop 3 times
+            self.ctx.log("Step 2: Gong Xi! (3x)")
+            for i in range(3):
+                self._internal_move_to(bow_2_locked, 0.4)
+                self._internal_move_to(bow_1_locked, 0.4)
+                
+            self.ctx.log("Bow Sequence Complete.")
+        except Exception as e:
+            self.ctx.log(f"Bow Error: {e}")
+
+    def run_new_year_sequence(self):
+        """
+        Executes the Happy New Year sequence with speed limit enforcement.
+        Blocks the thread but runs in background.
+        """
+        self.ctx.mode = "MANUAL"
+        self.ctx.io.send_torque(True)
+        self.ctx.log("Starting Happy New Year Sequence 🧨")
+        
+        # Helper to lock rear legs to SIT position
+        def merge_rear_legs_from_sit(target_pose):
+            new_pose = target_pose.copy()
+            # Rear Legs IDs: 7,8,9 (RL) and 10,11,12 (RR)
+            for i in range(7, 13):
+                sid_str = str(i)
+                if sid_str in self.POSE_SIT:
+                    new_pose[sid_str] = self.POSE_SIT[sid_str]
+            return new_pose
+
+        try:
+            # 1. Stand -> Sit (2.0s)
+            self.ctx.log("Step 1: Sit Down")
+            self._internal_move_to(self.POSE_SIT, 2.0)
+            time.sleep(0.5)
+            
+            # Prepare Bow Poses with Locked Rear Legs
+            bow_1_locked = merge_rear_legs_from_sit(self.POSE_BOW_1)
+            bow_2_locked = merge_rear_legs_from_sit(self.POSE_BOW_2)
+            
+            # 2. Sit -> Bow 1 (1.0s)
+            self.ctx.log("Step 2: Ready Bow (Rear Legs Locked)")
+            self._internal_move_to(bow_1_locked, 1.0)
+            
+            # 3. Bow Loop (3 times)
+            self.ctx.log("Step 3: Gong Xi! (Waving)")
+            for i in range(3):
+                self._internal_move_to(bow_2_locked, 0.4)
+                self._internal_move_to(bow_1_locked, 0.4)
+            
+            # 4. Bow -> Sit (1.0s)
+            self.ctx.log("Step 4: Sit Back")
+            self._internal_move_to(self.POSE_SIT, 1.0)
+            time.sleep(0.5)
+            
+            # 5. Sit -> Stand (2.0s)
+            self.ctx.log("Step 5: Stand Up")
+            self._internal_move_to(self.POSE_STAND, 2.0)
+            
+            self.ctx.log("Sequence Complete! Happy New Year!")
+            
+        except Exception as e:
+            self.ctx.log(f"Sequence Error: {e}")
 
     def on_entry_set(self, sid, entry):
         try:
@@ -204,8 +388,20 @@ class ManualControlFrame(tk.Frame):
                     sid = int(sid_str)
                     start = start_positions[sid]
                     
+                    # --- Shortest Path Logic for 0-4095 Wrap-around ---
+                    diff = target - start
+                    
+                    # If diff is larger than half-circle (2048), go the other way
+                    if diff > 2048:
+                        diff -= 4096
+                    elif diff < -2048:
+                        diff += 4096
+                    
                     # Interpolate
-                    current_target = int(start + (target - start) * t_eased)
+                    raw_val = start + diff * t_eased
+                    
+                    # Normalize to 0-4095 range
+                    current_target = int(raw_val) % 4096
                     
                     # Send with Time=0, Speed=0, Acc=0 (Max response)
                     cmds.append((sid, current_target, 0, 0, 0))
@@ -248,6 +444,32 @@ class ManualControlFrame(tk.Frame):
         self.ctx.io.send_torque(True)
         self.ctx.log("Executing Software Smooth Stand Up")
         self.perform_synchronized_move(targets, duration_sec=2.0)
+
+    def copy_pwm(self):
+        try:
+            data = {}
+            # Use hardware feedback data for accuracy, especially in RELAX/Teach mode
+            with self.ctx.io.lock:
+                states = self.ctx.io.servo_states.copy()
+            
+            for i in range(1, DISPLAY_SERVO_COUNT + 1):
+                # Prefer real feedback position if available and valid
+                if i in states and 'pos' in states[i] and states[i]['pos'] > 0:
+                    data[str(i)] = states[i]['pos']
+                elif i in self.pos_vars:
+                    # Fallback to slider value if no feedback
+                    data[str(i)] = self.pos_vars[i].get()
+            
+            json_str = json.dumps(data)
+            self.clipboard_clear()
+            self.clipboard_append(json_str)
+            self.update() # Required to finalize clipboard update
+            
+            self.ctx.log(f"Copied {len(data)} REAL servo positions to clipboard.")
+            messagebox.showinfo("Success", "Real-time PWM positions copied!")
+        except Exception as e:
+            self.ctx.log(f"Copy Error: {e}")
+            messagebox.showerror("Error", f"Failed to copy: {e}")
 
     def paste_and_move(self):
         try:
@@ -315,9 +537,30 @@ class ManualControlFrame(tk.Frame):
         self.after(20, self.control_loop)
 
     def update_ui_loop(self):
-        # Update Feedback Labels (if IO supported reading back positions easily)
-        # Assuming robot_io updates servo_states someday
-        self.after(100, self.update_ui_loop)
+        with self.ctx.io.lock:
+            states = self.ctx.io.servo_states.copy()
+            
+        for sid, state in states.items():
+            # Update Feedback Labels
+            if sid in self.fb_labels:
+                lbls = self.fb_labels[sid]
+                lbls['pos'].config(text=f"P:{state.get('pos', '----')}")
+                lbls['spd'].config(text=f"S:{state.get('spd', '----')}")
+                lbls['curr'].config(text=f"I:{state.get('current', '----')}")
+                lbls['volt'].config(text=f"V:{state.get('voltage', 0)/10.0:.1f}")
+                lbls['temp'].config(text=f"T:{state.get('temp', '--')}")
+            
+            # Auto-Update Sliders in RELAX mode (Teach Mode)
+            # This allows the user to move the robot by hand and see the sliders move
+            if self.ctx.mode == "RELAX" and sid in self.pos_vars:
+                real_pos = state.get('pos', -1)
+                if real_pos > 0:
+                    # Check if significantly different to avoid fighting the user or jitter
+                    current_slider_val = self.pos_vars[sid].get()
+                    if abs(current_slider_val - real_pos) > 2:
+                        self.pos_vars[sid].set(real_pos)
+        
+        self.after(50, self.update_ui_loop)
 
 class TestLabFrame(tk.Frame):
     def __init__(self, parent, context):
