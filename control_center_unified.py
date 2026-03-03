@@ -25,14 +25,27 @@ class SharedContext:
     def __init__(self):
         self.io = RobotIO() 
         self.running = True
-        self.mode = "RELAX" # Default to RELAX to prevent jerk on startup
+        self.mode = "RELAX"
         self.log_callback = None
+        # IMU Offset for zeroing
+        self.imu_offsets = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0}
     
     def log(self, msg):
-        if self.log_callback:
-            self.log_callback(msg)
-        else:
-            print(f"[Context] {msg}")
+        if self.log_callback: self.log_callback(msg)
+        else: print(f"[Context] {msg}")
+
+    def get_corrected_imu(self):
+        raw = self.io.get_imu()
+        return {
+            'roll': raw['roll'] - self.imu_offsets['roll'],
+            'pitch': raw['pitch'] - self.imu_offsets['pitch'],
+            'yaw': raw['yaw'] - self.imu_offsets['yaw']
+        }
+
+    def zero_imu(self):
+        raw = self.io.get_imu()
+        self.imu_offsets = raw.copy()
+        self.log("IMU Zeroed at current orientation.")
 
 class ManualControlFrame(tk.Frame):
     def __init__(self, parent, context):
@@ -44,9 +57,11 @@ class ManualControlFrame(tk.Frame):
         self.servo_states = {i: {'pos': 2048, 'spd': 0, 'load': 0, 'current': 0, 'voltage': 0, 'temp': 0} for i in range(1, 32)}
         
         # Global Parameters for Native Control
+        # IMPORTANT: Speed Limit must be > 0 (e.g., 3400) when using Time mode!
+        # Speed=0 is interpreted by servo as "unlimited/instant" and ignores Time.
         self.global_vars = {
             "Time (ms)": tk.IntVar(value=0),
-            "Speed Limit": tk.IntVar(value=0),
+            "Speed Limit": tk.IntVar(value=3400),  # ST3215 max speed, allows Time to work
             "Acceleration": tk.IntVar(value=0),
             "Use Native Timing": tk.BooleanVar(value=True)
         }
@@ -94,6 +109,9 @@ class ManualControlFrame(tk.Frame):
         for name in ["Time (ms)", "Speed Limit", "Acceleration"]:
             tk.Label(param_f, text=name+":", bg="#3c3f41", fg="#eee").pack(side="left", padx=2)
             tk.Entry(param_f, textvariable=self.global_vars[name], width=6, bg="#1e1e1e", fg="#00ff00").pack(side="left", padx=5)
+        
+        tk.Button(param_f, text="Save All Offsets", command=self.save_all_offsets, 
+                 bg="#2196F3", fg="white").pack(side="right", padx=10)
         
         # Scrollable Area
         canvas = tk.Canvas(self, bg="#2b2b2b", highlightthickness=0)
@@ -306,6 +324,20 @@ class ManualControlFrame(tk.Frame):
         except Exception as e:
             self.ctx.log(f"Sequence Error: {e}")
 
+    def on_offset_set(self, sid, var):
+        try:
+            val = var.get()
+            cfg.set_offset(sid, val)
+            self.ctx.log(f"Set Offset for ID {sid}: {val} (Click 'Save All' to persist)")
+        except: pass
+
+    def save_all_offsets(self):
+        try:
+            cfg.save()
+            self.ctx.log("All offsets saved to config.json successfully!")
+        except Exception as e:
+            self.ctx.log(f"Failed to save offsets: {e}")
+
     def on_entry_set(self, sid, entry):
         try:
             val = int(entry.get())
@@ -319,8 +351,17 @@ class ManualControlFrame(tk.Frame):
         self.ctx.log("Mode: MANUAL (Torque ON)")
 
     def sync_sliders(self):
-        # Not fully implemented in IO yet, but placeholder
-        pass
+        """Alings sliders to actual hardware positions to prevent sudden jumps."""
+        states = self.ctx.io.get_servo_states()
+        count = 0
+        for sid, data in states.items():
+            if sid in self.pos_vars:
+                self.pos_vars[sid].set(data['pos'])
+                count += 1
+        if count > 0:
+            self.ctx.log(f"Synced {count} sliders from hardware.")
+        else:
+            self.ctx.log("Sync failed: No servo feedback data received yet.")
 
     def relax_all(self):
         self.ctx.mode = "RELAX"
@@ -722,6 +763,9 @@ class TrotControlFrame(tk.Frame):
                                   bg="#4CAF50", fg="white", font=("Arial", 12, "bold"), width=15)
         self.btn_start.pack(side="left", padx=10)
         
+        tk.Button(btn_f, text="Zero IMU", command=self.ctx.zero_imu, 
+                 bg="#9E9E9E", fg="white", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+
         tk.Button(btn_f, text="Emergency Stop", command=self.emergency_stop, 
                  bg="#f44336", fg="white", font=("Arial", 12, "bold")).pack(side="right", padx=10)
 
@@ -786,8 +830,8 @@ class TrotControlFrame(tk.Frame):
         self.running_trot = True
         self.start_time = time.perf_counter()
         
-        # Initialize Yaw Target
-        imu = self.ctx.io.get_imu()
+        # Initialize Yaw Target (Use Corrected orientation)
+        imu = self.ctx.get_corrected_imu()
         self.target_yaw = imu['yaw']
         self.balance.pid_yaw.reset()
         
@@ -811,7 +855,7 @@ class TrotControlFrame(tk.Frame):
 
     def update_imu_display(self):
         if self.running_trot:
-            imu = self.ctx.io.get_imu()
+            imu = self.ctx.get_corrected_imu()
             self.lbl_imu_roll.config(text=f"Roll: {imu['roll']:.2f}")
             self.lbl_imu_pitch.config(text=f"Pitch: {imu['pitch']:.2f}")
         self.after(100, self.update_imu_display)
@@ -842,8 +886,8 @@ class TrotControlFrame(tk.Frame):
         # Soft Start (Ramp height)
         current_step_h = min(step_h, step_h * (elapsed / 2.0))
         
-        # IMU & Yaw Correction
-        imu = self.ctx.io.get_imu()
+        # IMU & Yaw Correction (Using Corrected Angles)
+        imu = self.ctx.get_corrected_imu()
         yaw_corr_rad = 0.0
         
         bal_offsets = {"FL":0, "FR":0, "RL":0, "RR":0}
@@ -943,10 +987,13 @@ class TrotControlFrame(tk.Frame):
                 ids = self.leg_ids[name]
                 # Use a small Time (20ms) to allow servo internal smoothing 
                 # between Python update cycles.
+                # IMPORTANT: Speed must be > 0 (e.g., 3400 max) for Time to take effect!
+                # Speed=0 may be interpreted as "unlimited/instant" by servo firmware.
                 t_smooth = 20 
-                cmds.append((ids[0], q[0], t_smooth, 0, current_acc))
-                cmds.append((ids[1], q[1], t_smooth, 0, current_acc))
-                cmds.append((ids[2], q[2], t_smooth, 0, current_acc))
+                max_spd = 3400  # ST3215 max speed
+                cmds.append((ids[0], q[0], t_smooth, max_spd, current_acc))
+                cmds.append((ids[1], q[1], t_smooth, max_spd, current_acc))
+                cmds.append((ids[2], q[2], t_smooth, max_spd, current_acc))
                 
         self.ctx.io.send_servos(cmds)
         

@@ -4,6 +4,7 @@ import threading
 import time
 import struct
 import queue
+from robot_config import cfg
 
 # Protocol Constants
 HEAD_1 = 0xA5
@@ -87,18 +88,32 @@ class RobotIO:
                     sid, pos, spd, acc = item
                     time_val = 0 
                 
+                # Debug: Check for invalid values before packing
+                if not (0 <= int(sid) <= 255):
+                    print(f"[DEBUG] Invalid SID: {sid} (type: {type(sid)})")
+                if not (0 <= int(acc) <= 255):
+                    print(f"[DEBUG] Invalid ACC: {acc} (type: {type(acc)}, item: {item})")
+                
                 # Format: < (little), B(ID), B(Acc), h(Pos), H(Time), H(Spd)
-                # Ensure all values are within uint8/int16/uint16 limits
                 u_sid = max(0, min(255, int(sid)))
                 u_acc = max(0, min(255, int(acc)))
-                i_pos = max(-32768, min(32767, int(pos)))
+                calibrated_pos = int(pos) + cfg.get_offset(u_sid)
+                i_pos = max(-32768, min(32767, calibrated_pos))
                 u_time = max(0, min(65535, int(time_val)))
                 u_spd = max(0, min(65535, int(spd)))
+                
+                # CRITICAL FIX: If Time>0 but Speed=0, servo may ignore Time and move instantly!
+                # Auto-correct Speed to max (3400) to ensure Time takes effect.
+                if u_time > 0 and u_spd == 0:
+                    print(f"[WARN] ID {u_sid}: Time={u_time}ms but Speed=0. Speed=0 disables Time mode!")
+                    print(f"[WARN] Auto-setting Speed to 3400 to allow Time-based motion.")
+                    u_spd = 3400  # ST3215 max speed
                 
                 payload.extend(struct.pack('<B B h H H', u_sid, u_acc, i_pos, u_time, u_spd))
             self._send_packet(CMD_TYPE_SERVO_CTRL, payload)
         except Exception as e:
             print(f"[RobotIO] Send Servo Error: {e}")
+            print(f"[RobotIO] Debug - First item: {servo_data_list[0] if servo_data_list else 'EMPTY'}")
 
     def get_imu(self):
         with self.lock:
@@ -152,19 +167,11 @@ class RobotIO:
         try:
             data = struct.unpack('<9f', payload[:36])
             with self.lock:
-                # Basic Low-Pass Filter (Simple Exponential Smoothing)
-                alpha = 0.2  # Smoothing factor (0 < alpha < 1). Lower = more smooth, higher = faster response.
-                
-                raw_roll = data[6]
-                raw_pitch = data[7]
-                raw_yaw = data[8]
-                
-                self.imu_data['roll'] = self.imu_data['roll'] * (1 - alpha) + raw_roll * alpha
-                self.imu_data['pitch'] = self.imu_data['pitch'] * (1 - alpha) + raw_pitch * alpha
-                self.imu_data['yaw'] = self.imu_data['yaw'] * (1 - alpha) + raw_yaw * alpha
-                
-        except Exception:
-            pass
+                alpha = 0.2
+                self.imu_data['roll'] = self.imu_data['roll'] * (1 - alpha) + data[6] * alpha
+                self.imu_data['pitch'] = self.imu_data['pitch'] * (1 - alpha) + data[7] * alpha
+                self.imu_data['yaw'] = self.imu_data['yaw'] * (1 - alpha) + data[8] * alpha
+        except: pass
 
     def _parse_rl_state(self, payload):
         self._parse_imu(payload)
