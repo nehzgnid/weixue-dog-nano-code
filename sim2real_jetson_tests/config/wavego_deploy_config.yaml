@@ -1,0 +1,163 @@
+# WAVEGO Sim2Real 部署配置文件
+# ===================================
+# 此文件定义了从 IsaacLab 训练策略部署到实机所需的所有参数。
+# 所有数值必须与训练配置保持一致。
+
+# --- 模型文件路径 ---
+model:
+  onnx_path: "config/wavego_policy.onnx"
+  normalizer_path: "config/normalizer_stats.npz"
+
+# --- 策略参数 ---
+policy:
+  obs_dim: 48
+  action_dim: 12
+  action_scale: 0.25
+  normalizer_clip: 5.0
+  normalizer_eps: 1.0e-8
+
+# --- 控制频率 ---
+timing:
+  control_freq_hz: 50       # 1 / (sim_dt * decimation) = 1 / (0.005 * 4)
+  control_dt_s: 0.02        # 20 ms
+  sim_dt: 0.005             # 仅供参考（实机不需要此项）
+  decimation: 4             # 仅供参考
+
+# --- 关节定义 ---
+joints:
+  # 策略关节顺序（来自 IO descriptors 导出）
+  # 按类型分组：all hip → all thigh → all calf
+  policy_order:
+    - FL_hip_joint      # [0]
+    - FR_hip_joint      # [1]
+    - RL_hip_joint      # [2]
+    - RR_hip_joint      # [3]
+    - FL_thigh_joint    # [4]
+    - FR_thigh_joint    # [5]
+    - RL_thigh_joint    # [6]
+    - RR_thigh_joint    # [7]
+    - FL_calf_joint     # [8]
+    - FR_calf_joint     # [9]
+    - RL_calf_joint     # [10]
+    - RR_calf_joint     # [11]
+
+  # 舵机/MuJoCo 关节顺序（DFS 按腿分组）
+  servo_order:
+    - FL_hip_joint      # [0]
+    - FL_thigh_joint    # [1]
+    - FL_calf_joint     # [2]
+    - FR_hip_joint      # [3]
+    - FR_thigh_joint    # [4]
+    - FR_calf_joint     # [5]
+    - RL_hip_joint      # [6]
+    - RL_thigh_joint    # [7]
+    - RL_calf_joint     # [8]
+    - RR_hip_joint      # [9]
+    - RR_thigh_joint    # [10]
+    - RR_calf_joint     # [11]
+
+  # 默认站立位（policy 关节顺序，单位 rad）
+  default_pos_policy:
+    - 0.1      # FL_hip
+    - -0.1     # FR_hip
+    - -0.1     # RL_hip
+    - 0.1      # RR_hip
+    - -0.65    # FL_thigh
+    - 0.65     # FR_thigh
+    - -0.65    # RL_thigh
+    - 0.65     # RR_thigh
+    - 0.6      # FL_calf
+    - -0.6     # FR_calf
+    - 0.6      # RL_calf
+    - -0.6     # RR_calf
+
+  # 关节限位（policy 关节顺序，单位 rad）
+  limits_low_policy:
+    - -0.5236  # FL_hip
+    - -0.5236  # FR_hip
+    - -0.5236  # RL_hip
+    - -0.5236  # RR_hip
+    - -2.0944  # FL_thigh
+    - -2.0944  # FR_thigh
+    - -2.0944  # RL_thigh
+    - -2.0944  # RR_thigh
+    - -2.0944  # FL_calf
+    - -2.0944  # FR_calf
+    - -2.0944  # RL_calf
+    - -2.0944  # RR_calf
+
+  limits_high_policy:
+    - 0.5236
+    - 0.5236
+    - 0.5236
+    - 0.5236
+    - 2.0944
+    - 2.0944
+    - 2.0944
+    - 2.0944
+    - 2.0944
+    - 2.0944
+    - 2.0944
+    - 2.0944
+
+  # 索引映射: policy[i] 对应 servo[policy_to_servo[i]]
+  policy_to_servo: [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11]
+  # 反向映射: servo[i] 对应 policy[servo_to_policy[i]]
+  servo_to_policy: [0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11]
+
+# --- 硬件通信 (STM32 USB CDC) ---
+# 架构: Jetson Nano ↔ USB CDC ↔ STM32F407 ↔ USART+DMA ↔ 12× STS3215
+#          Jetson Nano ←────── USB CDC ────── STM32F407 ← UART ← WT61C IMU
+hardware:
+  serial_port: "/dev/ttyACM0"   # udev 规则生效后也可使用 /dev/wavego_stm32
+  serial_baud: 115200
+  serial_timeout: 0.01           # 10ms 读超时
+  # 注意: IMU 通过 STM32 回传，Jetson 上无需 I2C / smbus2
+
+# --- 观测构建 (ObsBuilder 配置) ---
+observation:
+  # DFS 舵机 ID 顺序 → Isaac Lab 关节顺序 的索引映射
+  # DFS:   [FL_h, FL_t, FL_c, FR_h, FR_t, FR_c, RL_h, RL_t, RL_c, RR_h, RR_t, RR_c]
+  # Isaac: [FL_h, FR_h, RL_h, RR_h, FL_t, FR_t, RL_t, RR_t, FL_c, FR_c, RL_c, RR_c]
+  # ✅ DFS[0]=FL_h → Isaac[0]; DFS[1]=FL_t → Isaac[4]; DFS[2]=FL_c → Isaac[8] ...
+  servo_to_isaac: [0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11]
+
+  # 关节方向标志（Isaac 顺序）: +1=与仿真一致, -1=需取反
+  # ⚠️ 必须通过单关节实机激励标定后修改
+  joint_direction: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+  # 零点偏移 (Isaac 顺序, rad): 实机零位弧度 - 仿真零位弧度
+  joint_zero_offsets: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+  # WT61C 轴定义 → Isaac Lab body frame (X=前 Y=左 Z=上)
+  # 查阅 WT61C 手册确认安装方向后修改
+  imu_axis_remap: [0, 1, 2]     # 轴重映射索引
+  imu_axis_sign: [1, 1, 1]      # 每轴符号 (+1 或 -1)
+
+  # base_lin_vel 估计模式: 'zero'(推荐首次尝试) 或 'integrate'
+  base_lin_vel_mode: "zero"
+
+  # 串口协议说明仅作提示；最终以当前固件抓包/源码为准
+  protocol_note: "default_tx=TYPE+LEN+SUM; rx兼容TYPE+LEN+SUM与LEN+CMD+XOR"
+
+# --- 安全参数 ---
+safety:
+  max_action_delta: 0.5       # 单步动作变化量上限 (rad)
+  max_pitch_deg: 45.0         # 俯仰角上限 → 触发急停
+  max_roll_deg: 45.0          # 翻滚角上限 → 触发急停
+  min_base_height: 0.05       # 基座高度下限（如有高度估计）
+  emergency_stop_enabled: true
+
+# --- 滤波参数 ---
+filters:
+  action_lpf_alpha: 0.7       # 动作低通滤波系数 (1.0=不滤波)
+  imu_gyro_lpf_alpha: 0.8     # IMU 陀螺仪低通滤波
+  joint_vel_lpf_alpha: 0.5    # 关节速度低通滤波
+
+# --- 调试选项 ---
+debug:
+  print_every: 50              # 每 N 步打印一次
+  log_csv: false               # 是否记录 CSV
+  log_csv_path: "logs/real_run.csv"
+  dry_run: false               # true = 只推理不发指令
+  use_lin_vel_estimate: false  # false = base_lin_vel 置零
