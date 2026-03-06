@@ -83,11 +83,13 @@ class STM32Bridge:
         baudrate: int = 115200,
         timeout: float = 0.01,
         tx_packet_format: str = "type_len_sum",
+        servo_cmd_format: str = "robotio_id_list",
     ):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self.tx_packet_format = tx_packet_format
+        self.servo_cmd_format = servo_cmd_format
         self.ser: serial.Serial | None = None
 
         # ── 最新状态缓存 ────────────────────────────────────────────────────
@@ -161,8 +163,26 @@ class STM32Bridge:
         if not self._is_open():
             return
         target_raw = np.clip(target_raw, 0, 4095).astype(np.int16)
-        # payload: 12×int16 position + uint16 speed + uint16 time
-        payload = struct.pack(f"<12hHH", *target_raw, speed, time_ms)
+
+        if self.servo_cmd_format == "compact12":
+            # 旧格式: 12×int16 position + uint16 speed + uint16 time
+            payload = struct.pack(f"<12hHH", *target_raw, speed, time_ms)
+            self._send_packet(CMD_SERVO_CTRL, payload)
+            return
+
+        # 默认 RobotIO 兼容格式:
+        # payload = count(1) + N * [sid(1), acc(1), pos(i16), time(u16), speed(u16)]
+        # sid: 1..12 (DFS 顺序)
+        count = 12
+        u_speed = max(0, min(65535, int(speed)))
+        u_time = max(0, min(65535, int(time_ms)))
+        acc = 0
+
+        payload = bytearray([count])
+        for idx, pos in enumerate(target_raw.tolist(), start=1):
+            sid = max(1, min(255, int(idx)))
+            i_pos = max(-32768, min(32767, int(pos)))
+            payload.extend(struct.pack("<B B h H H", sid, acc, i_pos, u_time, u_speed))
         self._send_packet(CMD_SERVO_CTRL, payload)
 
     def set_torque(self, enable: bool):

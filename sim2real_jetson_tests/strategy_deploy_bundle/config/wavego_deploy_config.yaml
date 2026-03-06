@@ -137,6 +137,13 @@ observation:
   # base_lin_vel 估计模式: 'zero'(推荐首次尝试) 或 'integrate'
   base_lin_vel_mode: "zero"
 
+  # 关节速度来源：
+  # false(默认) = 用关节位置差分估计（推荐，避免固件速度编码差异引入伪速度）
+  # true         = 使用固件回传 servo_vel（需确认协议单位/符号位）
+  use_servo_vel_feedback: false
+  # 当 use_servo_vel_feedback=true 时，超过该阈值视为异常并回退到差分速度
+  max_servo_vel_abs: 20.0
+
   # 串口协议说明仅作提示；最终以当前固件抓包/源码为准
   protocol_note: "default_tx=TYPE+LEN+SUM; rx兼容TYPE+LEN+SUM与LEN+CMD+XOR"
 
@@ -157,6 +164,7 @@ filters:
 # --- 调试选项 ---
 debug:
   print_every: 50              # 每 N 步打印一次
+  print_joint_vel: true        # 默认打印12维关节速度（可用 --no-print-joint-vel 关闭）
   log_csv: false               # 是否记录 CSV
   log_csv_path: "logs/real_run.csv"
   dry_run: false               # true = 只推理不发指令

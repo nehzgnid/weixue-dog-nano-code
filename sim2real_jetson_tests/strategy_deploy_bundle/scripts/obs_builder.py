@@ -103,12 +103,16 @@ class ObsBuilder:
         self.imu_axis_sign  = np.array(cfg.get("imu_axis_sign", [1.0, 1.0, 1.0]), dtype=np.float32)
 
         self.base_lin_vel_mode = cfg.get("base_lin_vel_mode", "zero")
+        # 速度反馈字段在不同固件上编码可能不一致，默认关闭直接使用，改为差分估计更稳妥。
+        self.use_servo_vel_feedback = bool(cfg.get("use_servo_vel_feedback", False))
+        self.max_servo_vel_abs = float(cfg.get("max_servo_vel_abs", 20.0))
         self._vel_estimate = np.zeros(3, dtype=np.float32)
         self._vel_decay    = 0.95
 
         # 缓存
         self.last_action    : np.ndarray = np.zeros(12, dtype=np.float32)
         self.prev_joint_pos : np.ndarray | None = None
+        self._warned_bad_servo_vel = False
 
     # ── 核心接口 ─────────────────────────────────────────────────────────────
 
@@ -194,7 +198,8 @@ class ObsBuilder:
         target_isaac = target_isaac * self.joint_direction
 
         # Isaac 顺序 → DFS 舵机顺序
-        target_dfs = target_isaac[self.ISAAC_TO_SERVO]
+        # DFS[j] 对应 Isaac[servo_to_isaac[j]]
+        target_dfs = target_isaac[self.servo_to_isaac]
 
         # rad → STS3215 刻度 (4096 步/圈, 中位 2048 = 0 rad)
         target_raw = np.round(target_dfs / (2 * np.pi) * 4096 + 2048).astype(np.int32)
@@ -214,7 +219,8 @@ class ObsBuilder:
 
     def _servo_to_isaac_rad(self, servo_pos_dfs: np.ndarray) -> np.ndarray:
         """DFS 顺序弧度 → Isaac 顺序弧度（含方向修正和零点修正）。"""
-        isaac_rad = servo_pos_dfs[self.servo_to_isaac]   # 重排
+        # Isaac[i] 对应 DFS[ISAAC_TO_SERVO[i]]
+        isaac_rad = servo_pos_dfs[self.ISAAC_TO_SERVO]   # 重排
         isaac_rad = isaac_rad * self.joint_direction       # 方向
         isaac_rad = isaac_rad - self.joint_zero_offsets    # 零点
         return isaac_rad.astype(np.float32)
@@ -224,10 +230,19 @@ class ObsBuilder:
     ) -> np.ndarray:
         """关节速度：优先用舵机反馈，次选有限差分。"""
         vel_raw = state.get("servo_vel")
-        if vel_raw is not None and np.any(vel_raw != 0):
+        if self.use_servo_vel_feedback and vel_raw is not None and np.any(vel_raw != 0):
             # 从舵机反馈（需确认固件单位，此处假设已为 rad/s）
-            vel = np.array(vel_raw, dtype=np.float32)[self.servo_to_isaac] * self.joint_direction
-        elif self.prev_joint_pos is not None and dt > 1e-5:
+            vel_fb = np.array(vel_raw, dtype=np.float32)[self.servo_to_isaac] * self.joint_direction
+            if np.all(np.isfinite(vel_fb)) and float(np.max(np.abs(vel_fb))) <= self.max_servo_vel_abs:
+                return vel_fb.astype(np.float32)
+            if not self._warned_bad_servo_vel:
+                print(
+                    f"[WARN] servo_vel 反馈疑似异常(>|{self.max_servo_vel_abs:.1f}|rad/s)，"
+                    "已回退为位置差分速度。"
+                )
+                self._warned_bad_servo_vel = True
+
+        if self.prev_joint_pos is not None and dt > 1e-5:
             vel = (joint_pos_isaac - self.prev_joint_pos) / dt
         else:
             vel = np.zeros(12, dtype=np.float32)

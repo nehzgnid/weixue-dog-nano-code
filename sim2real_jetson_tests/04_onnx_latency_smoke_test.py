@@ -10,8 +10,8 @@ import onnxruntime as ort
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="ONNX 推理与全链路轻量测试")
-    parser.add_argument("--model", default="/home/user/IsaacLab/sim2real_test/config/wavego_policy.onnx")
-    parser.add_argument("--stats", default="/home/user/IsaacLab/sim2real_test/config/normalizer_stats.npz")
+    parser.add_argument("--model", default="/workspace/weixue-dog-nano-code/sim2real_jetson_tests/strategy_deploy_bundle/config/wavego_policy.onnx")
+    parser.add_argument("--stats", default="/workspace/weixue-dog-nano-code/sim2real_jetson_tests/strategy_deploy_bundle/config/normalizer_stats.npz")
     parser.add_argument("--iters", type=int, default=500)
     args = parser.parse_args()
 

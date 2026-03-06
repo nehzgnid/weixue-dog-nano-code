@@ -40,15 +40,17 @@ except ImportError:
     print("[WARN] onnxruntime not installed, will use dummy policy")
 
 # 导入核心模块
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+TESTS_DIR = SCRIPT_DIR.parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(TESTS_DIR))
 
 try:
-    from stm32_bridge import STM32Bridge
     from obs_builder import ObsBuilder
+    from robotio_bridge import RobotIOBridge
 except ImportError as e:
     print(f"[ERROR] 导入失败: {e}")
-    print("  请确认 stm32_bridge.py 和 obs_builder.py 在同一目录")
+    print("  请确认 obs_builder.py 与 robotio_bridge.py 可导入")
     sys.exit(1)
 
 # =============================================================================
@@ -214,13 +216,22 @@ def main():
     parser = argparse.ArgumentParser(description="WAVEGO Sim2Real 出 (透传STM32)推理")
     parser.add_argument("--config", type=str, default="config/wavego_deploy_config.yaml")
     parser.add_argument("--cmd-x",  type=float, default=0.0, help="前进速度 m/s")
-    parser.add_argument("--cmd-y",  type=float, default=0.0, help="侧移速度 m/s")
+    parser.add_argument("--cmd-y",  type=float, default=0.1, help="侧移速度 m/s")
     parser.add_argument("--cmd-wz", type=float, default=0.0, help="转向 rad/s")
-    parser.add_argument("--duration", type=float, default=10.0, help="运行时长 (秒)")
+    parser.add_argument("--duration", type=float, default=5.0, help="运行时长 (秒)")
     parser.add_argument("--dry-run", action="store_true", help="只推理不发指令")
     parser.add_argument("--no-gpu",  action="store_true", help="强制 CPU 推理")
     parser.add_argument("--log-csv", type=str, default=None)
     parser.add_argument("--port",   type=str, default=None, help="覆盖串口设备")
+    parser.add_argument("--servo-speed", type=int, default=3400, help="舵机速度参数")
+    parser.add_argument("--servo-time-ms", type=int, default=120, help="舵机插值时间ms")
+    parser.add_argument("--init-wait", type=float, default=1.0, help="初始站姿等待时间(秒)")
+    parser.add_argument("--action-lpf-alpha", type=float, default=0.7, help="动作低通alpha(0~1)，默认读取配置")
+    parser.add_argument("--print-every", type=int, default=None, help="日志打印步数间隔，默认读取配置")
+    parser.add_argument("--verbose-debug", action="store_true", help="打印更多连续性诊断信息")
+    parser.add_argument("--print-joint-vel", dest="print_joint_vel", action="store_true", help="打印12维关节速度数组(rad/s)")
+    parser.add_argument("--no-print-joint-vel", dest="print_joint_vel", action="store_false", help="关闭12维关节速度打印")
+    parser.set_defaults(print_joint_vel=None)
     args = parser.parse_args()
 
     # --- 加载配置 ---
@@ -234,11 +245,21 @@ def main():
     action_scale  = cfg["policy"]["action_scale"]
     limits_low    = np.array(cfg["joints"]["limits_low_policy"],  dtype=np.float32)
     limits_high   = np.array(cfg["joints"]["limits_high_policy"], dtype=np.float32)
-    print_every   = cfg["debug"]["print_every"]
+    print_every   = int(args.print_every if args.print_every is not None else cfg["debug"]["print_every"])
+    cfg_print_joint_vel = bool(cfg.get("debug", {}).get("print_joint_vel", True))
+    print_joint_vel = cfg_print_joint_vel if args.print_joint_vel is None else args.print_joint_vel
     command       = np.array([args.cmd_x, args.cmd_y, args.cmd_wz], dtype=np.float32)
+    cfg_alpha     = float(cfg.get("filters", {}).get("action_lpf_alpha", 1.0))
+    action_alpha  = float(args.action_lpf_alpha if args.action_lpf_alpha is not None else cfg_alpha)
+    action_alpha  = max(0.0, min(1.0, action_alpha))
 
     print(f"Command: vx={command[0]:.2f} vy={command[1]:.2f} wz={command[2]:.2f}")
     print(f"Control: {control_hz} Hz, dt={control_dt*1000:.0f}ms, 时长={args.duration}s")
+    print(f"Servo cmd: speed={args.servo_speed}, time_ms={args.servo_time_ms}, init_wait={args.init_wait}s")
+    print(f"Action LPF alpha={action_alpha:.2f}")
+    print(f"Joint vel print: {'ON' if print_joint_vel else 'OFF'}")
+    if np.all(np.abs(command) < 1e-6):
+        print("[INFO] 当前速度命令为 0：策略将偏向平衡/姿态保持，不会表现持续步态。")
 
     # --- Normalizer ---
     normalizer = ObsNormalizer(
@@ -253,13 +274,12 @@ def main():
         use_gpu=not args.no_gpu,
     )
 
-    # --- STM32Bridge ---
+    # --- RobotIOBridge ---
     hw_cfg = cfg["hardware"]
     port = args.port or hw_cfg["serial_port"]
-    bridge = STM32Bridge(
+    bridge = RobotIOBridge(
         port=port,
         baudrate=hw_cfg["serial_baud"],
-        timeout=hw_cfg.get("serial_timeout", 0.01),
     )
     if not args.dry_run:
         if not bridge.connect():
@@ -285,9 +305,10 @@ def main():
         time.sleep(0.3)
         # 先归默认站姿
         zero_targets = obs_builder.action_to_servo_targets(np.zeros(12, dtype=np.float32))
-        bridge.send_servo_targets(zero_targets)
-        print("初始站姿已发送，等待1秒...")
-        time.sleep(1.0)
+        bridge.send_servo_targets(zero_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
+        if args.init_wait > 0:
+            print(f"初始站姿已发送，等待{args.init_wait:.1f}秒...")
+            time.sleep(args.init_wait)
 
     # --- CSV logger ---
     csv_file = None
@@ -314,6 +335,8 @@ def main():
     next_time  = t_start
     total_steps = int(args.duration * control_hz)
     step        = 0
+    action_prev = np.zeros(12, dtype=np.float32)
+    target_prev = None
 
     try:
         while running and step < total_steps:
@@ -338,9 +361,11 @@ def main():
 
             # --- 3. 策略推理 ---
             action_raw = policy.predict(obs_norm)  # shape (12,)
+            action_cmd = action_alpha * action_raw + (1.0 - action_alpha) * action_prev
+            action_prev = action_cmd.copy()
 
             # --- 4. 动作转换为关节目标角度 (Isaac 顺序, rad) ---
-            target_pos_isaac = obs_builder.DEFAULT_JOINT_POS + action_raw * action_scale
+            target_pos_isaac = obs_builder.DEFAULT_JOINT_POS + action_cmd * action_scale
             target_pos_isaac = np.clip(target_pos_isaac, limits_low, limits_high)
 
             # --- 5. 安全检查 ---
@@ -357,9 +382,13 @@ def main():
             if not args.dry_run:
                 corrected = (target_pos_isaac - obs_builder.DEFAULT_JOINT_POS) / action_scale
                 servo_targets = obs_builder.action_to_servo_targets(corrected)
-                bridge.send_servo_targets(servo_targets, speed=0, time_ms=0)
+                bridge.send_servo_targets(servo_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
             else:
-                obs_builder.last_action = action_raw.copy()
+                obs_builder.last_action = action_cmd.copy()
+                servo_targets = obs_builder.action_to_servo_targets(action_cmd)
+
+            tgt_jump = 0 if target_prev is None else int(np.max(np.abs(servo_targets - target_prev)))
+            target_prev = servo_targets.copy()
 
             step += 1
             t_now = time.perf_counter()
@@ -369,18 +398,38 @@ def main():
             if step % print_every == 0:
                 elapsed = t_now - t_start
                 hz_avg  = step / elapsed if elapsed > 0 else 0
-                act_mag = float(np.abs(action_raw).mean())
+                act_mag = float(np.abs(action_cmd).mean())
+                state_age_ms = (time.perf_counter() - state["timestamp"]) * 1000.0 if not args.dry_run else 0.0
+                gyro_norm = float(np.linalg.norm(state["imu_gyro"]))
                 print(
                     f"step={step:5d}  t={elapsed:6.1f}s  hz={hz_avg:5.1f}  "
                     f"loop={loop_ms:5.1f}ms  |a|={act_mag:.3f}  "
                     f"roll={roll_deg:+5.1f}°  pitch={pitch_deg:+5.1f}°"
                     f"  {'[DRY]' if args.dry_run else ''}"
                 )
+                if args.verbose_debug:
+                    print(
+                        f"    tgt0={int(servo_targets[0])}  tgt1={int(servo_targets[1])}  "
+                        f"max|Δtarget|={tgt_jump}  gyro_norm={gyro_norm:.3f}  state_age={state_age_ms:.1f}ms"
+                    )
+                if print_joint_vel:
+                    vel_arr = np.array(state["servo_vel"], dtype=np.float32)
+                    pos_arr = np.array(state["servo_pos"], dtype=np.float32)
+                    cur_raw = np.round(pos_arr / (2 * np.pi) * 4096 + 2048).astype(np.int32)
+                    track_err = servo_targets.astype(np.int32) - cur_raw
+                    vel_text = np.array2string(vel_arr, precision=3, suppress_small=False, max_line_width=200)
+                    pos_text = np.array2string(pos_arr, precision=3, suppress_small=False, max_line_width=200)
+                    print(f"    servo_vel(rad/s)={vel_text}  vel_norm={float(np.linalg.norm(vel_arr)):.3f}")
+                    print(
+                        f"    servo_pos(rad)={pos_text}  max|target-cur|={int(np.max(np.abs(track_err)))}"
+                    )
+                if not args.dry_run and gyro_norm < 1e-3 and step >= print_every:
+                    print("[WARN] imu_gyro 近似为 0，策略动态观测不足，可能表现为仅姿态保持。")
 
             if csv_file:
                 csv_file.write(
                     f"{step},{t_now-t_start:.4f},{loop_ms:.2f},{roll_deg:.2f},{pitch_deg:.2f},"
-                    + ",".join(f"{a:.5f}" for a in action_raw) + "\n"
+                    + ",".join(f"{a:.5f}" for a in action_cmd) + "\n"
                 )
 
             # --- 8. 精确控频 ---
@@ -398,7 +447,7 @@ def main():
         gc.enable()
         if not args.dry_run:
             zero_targets = obs_builder.action_to_servo_targets(np.zeros(12, dtype=np.float32))
-            bridge.send_servo_targets(zero_targets)
+            bridge.send_servo_targets(zero_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
             time.sleep(0.3)
             bridge.set_torque(False)
             bridge.disconnect()
