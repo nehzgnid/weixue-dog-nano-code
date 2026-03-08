@@ -21,9 +21,16 @@ class RobotIO:
         self.ser = None
         self.running = False
         self.thread = None
+        self.last_rx_time = 0.0
         
         # Shared State
-        self.imu_data = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0}
+        self.imu_data = {
+            'roll': 0.0,
+            'pitch': 0.0,
+            'yaw': 0.0,
+            'gyro': [0.0, 0.0, 0.0],
+            'accel': [0.0, 0.0, 0.0],
+        }
         self.servo_states = {} # id -> {pos, spd, load}
         self.lock = threading.Lock()
         
@@ -48,6 +55,7 @@ class RobotIO:
             self.running = True
             self.thread = threading.Thread(target=self._rx_loop, daemon=True)
             self.thread.start()
+            self.last_rx_time = time.perf_counter()
             print(f"[RobotIO] Connected to {port}")
         except Exception as e:
             print(f"[RobotIO] Connection failed: {e}")
@@ -157,6 +165,7 @@ class RobotIO:
                 time.sleep(0.1)
 
     def _process_packet(self, pkt_type, payload):
+        self.last_rx_time = time.perf_counter()
         if pkt_type == FB_TYPE_SENSOR_IMU:
             self._parse_imu(payload)
         elif pkt_type == FB_TYPE_RL_STATE:
@@ -168,6 +177,12 @@ class RobotIO:
             data = struct.unpack('<9f', payload[:36])
             with self.lock:
                 alpha = 0.2
+                self.imu_data['accel'] = [
+                    self.imu_data['accel'][i] * (1 - alpha) + data[i] * alpha for i in range(3)
+                ]
+                self.imu_data['gyro'] = [
+                    self.imu_data['gyro'][i] * (1 - alpha) + data[3 + i] * alpha for i in range(3)
+                ]
                 self.imu_data['roll'] = self.imu_data['roll'] * (1 - alpha) + data[6] * alpha
                 self.imu_data['pitch'] = self.imu_data['pitch'] * (1 - alpha) + data[7] * alpha
                 self.imu_data['yaw'] = self.imu_data['yaw'] * (1 - alpha) + data[8] * alpha

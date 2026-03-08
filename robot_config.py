@@ -38,5 +38,9 @@ class RobotConfig:
         # JSON keys are strings
         return self.data['directions'].get(str(servo_id), 1)
 
+    def get_offset(self, servo_id):
+        offsets = self.data.get('servo_offsets', {})
+        return int(offsets.get(str(servo_id), 0))
+
 # 单例实例
 cfg = RobotConfig()
