@@ -30,7 +30,7 @@
 - 分支 A：`HEAD | TYPE | LEN | PAYLOAD | SUM`
 - 分支 B：`HEAD | LEN | CMD | PAYLOAD | XOR`
 
-`sim2real_test/scripts/stm32_bridge.py` 已改为：
+`sim2real_jetson_tests/strategy_deploy_bundle/scripts/stm32_bridge.py` 已改为：
 
 - 默认发送：分支 A（与 `robot_io.py` 一致）
 - 接收：兼容 A/B 两种格式

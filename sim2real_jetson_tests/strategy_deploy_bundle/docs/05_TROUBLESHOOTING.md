@@ -10,7 +10,7 @@
 命令：
 
 ```bash
-python sim2real_test/scripts/wavego_inference.py \
+python sim2real_jetson_tests/strategy_deploy_bundle/scripts/wavego_inference.py \
   --config config/wavego_deploy_config.yaml \
   --duration 1 --dry-run
 ```
@@ -44,13 +44,13 @@ lsusb
 - 用桥接器自测：
 
 ```bash
-python sim2real_test/scripts/stm32_bridge.py --port /dev/ttyACM0 --duration 3
+python sim2real_jetson_tests/strategy_deploy_bundle/scripts/stm32_bridge.py --port /dev/ttyACM0 --duration 3
 ```
 
 - 若仍无数据，切换发包格式重试：
 
 ```bash
-python sim2real_test/scripts/stm32_bridge.py \
+python sim2real_jetson_tests/strategy_deploy_bundle/scripts/stm32_bridge.py \
   --port /dev/ttyACM0 --duration 3 --tx-format len_cmd_xor
 ```
 

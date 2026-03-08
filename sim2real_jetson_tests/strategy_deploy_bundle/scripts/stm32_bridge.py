@@ -23,13 +23,13 @@ STM32 USB CDC 通信桥接器 — Jetson Nano 侧驱动。
 上位机 → 下位机 命令:
     0x01  CMD_HEARTBEAT      心跳包
     0x10  CMD_SERVO_CTRL     舵机目标位置控制
-    0x20  CMD_TORQUE         扭矩使能/禁用
+    0x11  CMD_TORQUE         扭矩使能/禁用
     0x30  CMD_REQUEST_STATE  请求全身状态
 
 下位机 → 上位机 反馈:
-    0x11  FB_SERVO_INFO      舵机状态 (pos, vel, load)
-    0x12  FB_IMU             IMU 数据 (euler + gyro + accel)
-    0x31  FB_FULL_STATE      全身状态包 (servo×12 + IMU)
+    0x20  FB_SERVO_INFO      舵机状态 (pos, vel, load)
+    0x30  FB_IMU             IMU 数据 (euler + gyro + accel)
+    0x40  FB_FULL_STATE      全身状态包 (servo×12 + IMU)
 """
 
 from __future__ import annotations
@@ -382,7 +382,7 @@ class STM32Bridge:
         # 兼容旧版 33f
         FULL_STATE_FMT = "<33f"
         size = struct.calcsize(FULL_STATE_FMT)
-        if len(data) >= size:
+        if len(data) == size:
             vals = struct.unpack_from(FULL_STATE_FMT, data)
             self.servo_positions[:]  = vals[0:12]
             self.servo_velocities[:] = vals[12:24]
@@ -423,7 +423,7 @@ class STM32Bridge:
 
     def _parse_servo_info(self, data: bytes):
         """
-        舵机状态包 (0x11)。
+        舵机状态包 (0x20)。
 
         格式 (12 × 6 bytes = 72 bytes):
             每个舵机: int16 pos_raw(0-4095) + int16 vel_raw + int16 load_raw
@@ -440,7 +440,7 @@ class STM32Bridge:
 
     def _parse_imu(self, data: bytes):
         """
-        IMU 数据包 (0x12)。
+        IMU 数据包 (0x30)。
 
         格式 (9 × float32 = 36 bytes):
             3 × float32  euler_deg  [roll, pitch, yaw]

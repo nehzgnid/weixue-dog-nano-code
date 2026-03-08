@@ -157,7 +157,7 @@ safety:
 
 # --- 滤波参数 ---
 filters:
-  action_lpf_alpha: 0.7       # 动作低通滤波系数 (1.0=不滤波)
+  action_lpf_alpha: 0.8       # 动作低通滤波系数 (1.0=不滤波)
   imu_gyro_lpf_alpha: 0.8     # IMU 陀螺仪低通滤波
   joint_vel_lpf_alpha: 0.5    # 关节速度低通滤波
 

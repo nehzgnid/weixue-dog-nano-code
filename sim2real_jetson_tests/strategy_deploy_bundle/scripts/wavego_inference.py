@@ -48,9 +48,10 @@ sys.path.insert(0, str(TESTS_DIR))
 try:
     from obs_builder import ObsBuilder
     from robotio_bridge import RobotIOBridge
+    from safety_guard import SafetyGuard as SharedSafetyGuard
 except ImportError as e:
     print(f"[ERROR] 导入失败: {e}")
-    print("  请确认 obs_builder.py 与 robotio_bridge.py 可导入")
+    print("  请确认 obs_builder.py / robotio_bridge.py / safety_guard.py 可导入")
     sys.exit(1)
 
 # =============================================================================
@@ -170,53 +171,14 @@ class ServoDriver:
 
 
 # =============================================================================
-# 安全保护 (SafetyGuard 转发 scripts/safety_guard.py)
-# =============================================================================
-
-class SafetyGuard:
-    def __init__(self, cfg: dict):
-        self.max_action_delta = cfg.get("max_action_delta", 0.3)
-        self.max_pitch_deg = cfg.get("max_pitch_deg", 45.0)
-        self.max_roll_deg = cfg.get("max_roll_deg", 45.0)
-        self.enabled = cfg.get("emergency_stop_enabled", True)
-        self._prev_target = None
-        self._triggered = False
-
-    def check(
-        self,
-        target_pos: np.ndarray,
-        roll_deg: float,
-        pitch_deg: float,
-    ) -> tuple:
-        if not self.enabled:
-            return target_pos, False
-        if abs(roll_deg) > self.max_roll_deg or abs(pitch_deg) > self.max_pitch_deg:
-            print(f"[SAFETY] E-stop! roll={roll_deg:.1f}°, pitch={pitch_deg:.1f}°")
-            self._triggered = True
-            return (self._prev_target if self._prev_target is not None else target_pos), True
-        if self._prev_target is not None:
-            delta = np.clip(
-                target_pos - self._prev_target,
-                -self.max_action_delta, self.max_action_delta
-            )
-            target_pos = self._prev_target + delta
-        self._prev_target = target_pos.copy()
-        return target_pos, False
-
-    @property
-    def is_triggered(self) -> bool:
-        return self._triggered
-
-
-# =============================================================================
-# 主循环——改用 STM32Bridge + ObsBuilder
+# 主循环——改用 RobotIOBridge + ObsBuilder
 # =============================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="WAVEGO Sim2Real 出 (透传STM32)推理")
     parser.add_argument("--config", type=str, default="config/wavego_deploy_config.yaml")
-    parser.add_argument("--cmd-x",  type=float, default=0.0, help="前进速度 m/s")
-    parser.add_argument("--cmd-y",  type=float, default=0.1, help="侧移速度 m/s")
+    parser.add_argument("--cmd-x",  type=float, default=0, help="前进速度 m/s")
+    parser.add_argument("--cmd-y",  type=float, default=0.2, help="侧移速度 m/s")
     parser.add_argument("--cmd-wz", type=float, default=0.0, help="转向 rad/s")
     parser.add_argument("--duration", type=float, default=5.0, help="运行时长 (秒)")
     parser.add_argument("--dry-run", action="store_true", help="只推理不发指令")
@@ -226,7 +188,7 @@ def main():
     parser.add_argument("--servo-speed", type=int, default=3400, help="舵机速度参数")
     parser.add_argument("--servo-time-ms", type=int, default=120, help="舵机插值时间ms")
     parser.add_argument("--init-wait", type=float, default=1.0, help="初始站姿等待时间(秒)")
-    parser.add_argument("--action-lpf-alpha", type=float, default=0.7, help="动作低通alpha(0~1)，默认读取配置")
+    parser.add_argument("--action-lpf-alpha", type=float, default=None, help="动作低通alpha(0~1)，默认读取配置")
     parser.add_argument("--print-every", type=int, default=None, help="日志打印步数间隔，默认读取配置")
     parser.add_argument("--verbose-debug", action="store_true", help="打印更多连续性诊断信息")
     parser.add_argument("--print-joint-vel", dest="print_joint_vel", action="store_true", help="打印12维关节速度数组(rad/s)")
@@ -235,7 +197,12 @@ def main():
     args = parser.parse_args()
 
     # --- 加载配置 ---
-    cfg_path = Path(__file__).parent.parent / args.config
+    cfg_path = Path(args.config)
+    if not cfg_path.is_absolute():
+        cfg_path = Path(__file__).parent.parent / cfg_path
+    if not cfg_path.exists():
+        print(f"[ERROR] 配置文件不存在: {cfg_path}")
+        sys.exit(1)
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
@@ -289,8 +256,16 @@ def main():
     # --- ObsBuilder ---
     obs_builder = ObsBuilder(cfg.get("observation", {}))
 
-    # --- SafetyGuard ---
-    safety = SafetyGuard(cfg["safety"])
+    # --- SafetyGuard (复用 scripts/safety_guard.py) ---
+    safety_cfg = cfg["safety"]
+    safety = SharedSafetyGuard(
+        joint_limits_low=limits_low,
+        joint_limits_high=limits_high,
+        max_action_delta=float(safety_cfg.get("max_action_delta", 0.5)),
+        max_pitch_deg=float(safety_cfg.get("max_pitch_deg", 45.0)),
+        max_roll_deg=float(safety_cfg.get("max_roll_deg", 45.0)),
+        heartbeat_timeout=0.2,
+    )
 
     # --- 加载完成——打印确认信息 ---
     print(f"\n[硬件] STM32 端口: {port}")
@@ -372,10 +347,11 @@ def main():
             gx, gy, gz = obs_raw[6:9]  # projected_gravity
             roll_deg  = float(np.degrees(np.arctan2(gy,  -gz)))
             pitch_deg = float(np.degrees(np.arctan2(-gx, np.sqrt(gy**2 + gz**2))))
-            target_pos_isaac, emergency = safety.check(target_pos_isaac, roll_deg, pitch_deg)
+            target_pos_isaac, is_safe = safety.check_and_clip(target_pos_isaac, roll_deg, pitch_deg)
 
-            if emergency:
-                print("[EMERGENCY] 异常急停!")
+            if not is_safe:
+                reason = safety.emergency_reason or "safety_guard"
+                print(f"[EMERGENCY] 异常急停! reason={reason}")
                 break
 
             # --- 6. 转换为舵机刻度并发送 ---

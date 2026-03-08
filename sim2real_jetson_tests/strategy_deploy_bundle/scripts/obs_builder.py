@@ -50,9 +50,6 @@ class ObsBuilder:
 
     # DFS index → Isaac index
     SERVO_TO_ISAAC = np.array([0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11], dtype=np.int32)
-    # Isaac index → DFS index
-    ISAAC_TO_SERVO = np.zeros(12, dtype=np.int32)
-
     ISAAC_JOINT_NAMES = [
         "FL_hip",  "FR_hip",  "RL_hip",  "RR_hip",
         "FL_thigh","FR_thigh","RL_thigh","RR_thigh",
@@ -92,9 +89,10 @@ class ObsBuilder:
         servo_to_isaac = cfg.get("servo_to_isaac", list(self.SERVO_TO_ISAAC))
         self.servo_to_isaac = np.array(servo_to_isaac, dtype=np.int32)
 
-        # 反向映射
+        # 反向映射（实例级，避免多个 ObsBuilder 共享同一可变数组）
+        self.isaac_to_servo = np.zeros(12, dtype=np.int32)
         for dfs_i, isaac_i in enumerate(self.servo_to_isaac):
-            self.ISAAC_TO_SERVO[isaac_i] = dfs_i
+            self.isaac_to_servo[isaac_i] = dfs_i
 
         self.joint_direction = np.array(cfg.get("joint_direction", [1.0] * 12), dtype=np.float32)
         self.joint_zero_offsets = np.array(cfg.get("joint_zero_offsets", [0.0] * 12), dtype=np.float32)
@@ -220,7 +218,7 @@ class ObsBuilder:
     def _servo_to_isaac_rad(self, servo_pos_dfs: np.ndarray) -> np.ndarray:
         """DFS 顺序弧度 → Isaac 顺序弧度（含方向修正和零点修正）。"""
         # Isaac[i] 对应 DFS[ISAAC_TO_SERVO[i]]
-        isaac_rad = servo_pos_dfs[self.ISAAC_TO_SERVO]   # 重排
+        isaac_rad = servo_pos_dfs[self.isaac_to_servo]   # 重排
         isaac_rad = isaac_rad * self.joint_direction       # 方向
         isaac_rad = isaac_rad - self.joint_zero_offsets    # 零点
         return isaac_rad.astype(np.float32)
@@ -232,7 +230,7 @@ class ObsBuilder:
         vel_raw = state.get("servo_vel")
         if self.use_servo_vel_feedback and vel_raw is not None and np.any(vel_raw != 0):
             # 从舵机反馈（需确认固件单位，此处假设已为 rad/s）
-            vel_fb = np.array(vel_raw, dtype=np.float32)[self.servo_to_isaac] * self.joint_direction
+            vel_fb = np.array(vel_raw, dtype=np.float32)[self.isaac_to_servo] * self.joint_direction
             if np.all(np.isfinite(vel_fb)) and float(np.max(np.abs(vel_fb))) <= self.max_servo_vel_abs:
                 return vel_fb.astype(np.float32)
             if not self._warned_bad_servo_vel:
