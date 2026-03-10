@@ -131,19 +131,19 @@ class ObsBuilder:
         Returns:
             np.ndarray shape=(48,), float32, 原始量纲，未归一化
         """
+        # ── [6:9]  projected_gravity (body frame) ──────────────────────────
+        roll_rad  = state["imu_roll"]  * (np.pi / 180.0)
+        pitch_rad = state["imu_pitch"] * (np.pi / 180.0)
+        projected_gravity = self._projected_gravity(roll_rad, pitch_rad)
+
         # ── [0:3]  base_lin_vel (m/s, body frame) ──────────────────────────
-        base_lin_vel = self._estimate_lin_vel(state, dt)
+        base_lin_vel = self._estimate_lin_vel(state, dt, projected_gravity)
 
         # ── [3:6]  base_ang_vel (rad/s, body frame) ────────────────────────
         # WT61C 陀螺仪直接输出 body frame 角速度 (deg/s) → 转 rad/s
         gyro_raw = np.array([state["imu_gyro"][i] for i in self.imu_axis_remap], dtype=np.float32)
         gyro_raw *= self.imu_axis_sign
         base_ang_vel = gyro_raw * (np.pi / 180.0)
-
-        # ── [6:9]  projected_gravity (body frame) ──────────────────────────
-        roll_rad  = state["imu_roll"]  * (np.pi / 180.0)
-        pitch_rad = state["imu_pitch"] * (np.pi / 180.0)
-        projected_gravity = self._projected_gravity(roll_rad, pitch_rad)
 
         # ── [9:12] velocity_commands ───────────────────────────────────────
         cmd = np.array(commands, dtype=np.float32)
@@ -246,17 +246,33 @@ class ObsBuilder:
             vel = np.zeros(12, dtype=np.float32)
         return vel.astype(np.float32)
 
-    def _estimate_lin_vel(self, state: dict, dt: float) -> np.ndarray:
-        """base_lin_vel 估计（WT61C 无法直接提供线速度）。"""
+    def _estimate_lin_vel(self, state: dict, dt: float, projected_gravity: np.ndarray) -> np.ndarray:
+        """base_lin_vel 高性能估计（重力补偿 + Leaky Integrator）。"""
         if self.base_lin_vel_mode == "zero":
             return np.zeros(3, dtype=np.float32)
 
         if self.base_lin_vel_mode == "integrate":
-            # 加速度积分 + 指数衰减
-            accel = np.array(
+            # 1. 获取 Isaac 坐标系下的原始加速度 (WT61C 默认单位为 g)
+            accel_g = np.array(
                 [state["imu_accel"][i] for i in self.imu_axis_remap], dtype=np.float32
             ) * self.imu_axis_sign
-            self._vel_estimate = self._vel_estimate * self._vel_decay + accel * dt
+            
+            # 2. 消除重力 (Gravity Compensation)
+            # accel_g 平放静止时为 [0, 0, 1]，projected_gravity 为 [0, 0, -1]
+            # 相加即为去重力后的机体线性加速度 (单位: g)
+            a_lin_g = accel_g + projected_gravity
+            
+            # 3. 转换为 m/s^2 (1g = 9.81 m/s^2)
+            a_lin_m_s2 = a_lin_g * 9.81
+            
+            # 4. 噪声死区滤除 (Deadband) 以防止静止时高频噪声积分漂移
+            deadband = 0.2 # m/s^2 阈值，根据 WT61C 实际静止时的噪声水平调整
+            a_lin_m_s2[np.abs(a_lin_m_s2) < deadband] = 0.0
+            
+            # 5. 高性能 Leaky Integrator (一阶高通滤波积分)
+            # 通过引入 _vel_decay (例如 0.95)，相当于融合了一个 v=0 的高方差伪观测(Kalman思想)
+            self._vel_estimate = self._vel_estimate * self._vel_decay + a_lin_m_s2 * dt
+            
             return self._vel_estimate.copy()
 
         return np.zeros(3, dtype=np.float32)
