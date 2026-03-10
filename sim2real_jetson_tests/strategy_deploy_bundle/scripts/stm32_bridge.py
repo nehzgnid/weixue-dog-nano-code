@@ -410,13 +410,18 @@ class STM32Bridge:
         max_count = min(count, 12, len(tail) // servo_entry_size)
         for i in range(max_count):
             off = i * servo_entry_size
-            sid, pos_raw, spd_raw, load_raw, _curr_raw, _volt_raw, _temp_raw = struct.unpack_from(
-                "<BhhhhBB", tail, off
+            sid, pos_raw, spd_raw_u, load_raw, _curr_raw, _volt_raw, _temp_raw = struct.unpack_from(
+                "<BhHhhBB", tail, off
             )
             idx = int(sid) - 1
             if 0 <= idx < 12:
+                # ST3215 uses sign-magnitude for velocity
+                sign = -1 if (spd_raw_u & 0x8000) else 1
+                magnitude = spd_raw_u & 0x7FFF
+                real_spd_raw = sign * magnitude
+                
                 self.servo_positions[idx] = (pos_raw - 2048) * (2 * np.pi / 4096)
-                self.servo_velocities[idx] = spd_raw * (2 * np.pi / 4096)
+                self.servo_velocities[idx] = real_spd_raw * (2 * np.pi / 4096)
                 self.servo_loads[idx] = load_raw / 1000.0
 
         self.last_state_time = time.perf_counter()
@@ -432,9 +437,15 @@ class STM32Bridge:
             return
         for i in range(12):
             off = i * 6
-            pos_raw, vel_raw, load_raw = struct.unpack_from("<3h", data, off)
+            pos_raw, vel_raw_u, load_raw = struct.unpack_from("<hHh", data, off)
+            
+            # ST3215 uses sign-magnitude for velocity
+            sign = -1 if (vel_raw_u & 0x8000) else 1
+            magnitude = vel_raw_u & 0x7FFF
+            real_vel_raw = sign * magnitude
+            
             self.servo_positions[i] = (pos_raw - 2048) * (2 * np.pi / 4096)
-            self.servo_velocities[i] = vel_raw * (2 * np.pi / 4096)   # 转换系数需按固件确认
+            self.servo_velocities[i] = real_vel_raw * (2 * np.pi / 4096)   # 转换系数需按固件确认
             self.servo_loads[i] = load_raw / 1000.0
         self.last_state_time = time.perf_counter()
 

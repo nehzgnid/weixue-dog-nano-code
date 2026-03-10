@@ -202,10 +202,16 @@ class RobotIO:
         for i in range(count):
             base = i * servo_size
             chunk = servo_data[base : base + servo_size]
-            sid, pos, spd, load, curr, volt, temp = struct.unpack('<BhhhhBB', chunk)
+            sid, pos, spd_u, load, curr, volt, temp = struct.unpack('<BhHhhBB', chunk)
+            
+            # ST3215 uses sign-magnitude for velocity
+            sign = -1 if (spd_u & 0x8000) else 1
+            magnitude = spd_u & 0x7FFF
+            real_spd = sign * magnitude
+            
             new_states[sid] = {
                 'pos': pos,
-                'spd': spd,
+                'spd': real_spd,
                 'load': load,
                 'current': curr,
                 'voltage': volt,

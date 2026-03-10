@@ -132,10 +132,10 @@ observation:
   # WT61C 轴定义 → Isaac Lab body frame (X=前 Y=左 Z=上)
   # 查阅 WT61C 手册确认安装方向后修改
   imu_axis_remap: [0, 1, 2]     # 轴重映射索引
-  imu_axis_sign: [1, 1, 1]      # 每轴符号 (+1 或 -1)
+  imu_axis_sign: [-1.0, -1.0, 1.0]      # 每轴符号 (+1 或 -1)
 
   # base_lin_vel 估计模式: 'zero'(推荐首次尝试) 或 'integrate'
-  base_lin_vel_mode: "zero"
+  base_lin_vel_mode: "integrate"
 
   # 关节速度来源：
   # false(默认) = 用关节位置差分估计（推荐，避免固件速度编码差异引入伪速度）
