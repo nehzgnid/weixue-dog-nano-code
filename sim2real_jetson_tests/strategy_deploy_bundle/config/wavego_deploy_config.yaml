@@ -131,8 +131,8 @@ observation:
 
   # WT61C 轴定义 → Isaac Lab body frame (X=前 Y=左 Z=上)
   # 查阅 WT61C 手册确认安装方向后修改
-  imu_axis_remap: [0, 1, 2]     # 轴重映射索引
-  imu_axis_sign: [-1.0, -1.0, 1.0]      # 每轴符号 (+1 或 -1)
+  imu_axis_remap: [1, 0, 2]     # 轴重映射索引
+  imu_axis_sign: [1.0, -1.0, 1.0]      # 每轴符号 (+1 或 -1)
 
   # base_lin_vel 估计模式: 'zero'(推荐首次尝试) 或 'integrate'
   base_lin_vel_mode: "integrate"
