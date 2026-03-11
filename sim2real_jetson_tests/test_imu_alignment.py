@@ -49,6 +49,10 @@ def main():
             # 获取原始 Euler 
             roll, pitch, yaw = state["imu_roll"], state["imu_pitch"], state["imu_yaw"]
             
+            # 机体坐标系下的欧拉角
+            robot_roll = -pitch
+            robot_pitch = roll
+            
             # --- 使用 ObsBuilder 内部的高性能解算 ---
             obs_raw = obs_builder.build_observation(state, np.zeros(3), dt)
             
@@ -64,7 +68,8 @@ def main():
             
             # --- 验证输出 ---
             print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] 原始位姿与高性能解算数据:")
-            print(f"  Euler (欧拉角)    : Roll={roll:+6.2f}°, Pitch={pitch:+6.2f}°, Yaw={yaw:+6.2f}°")
+            print(f"  IMU Euler(原始)   : Roll={roll:+6.2f}°, Pitch={pitch:+6.2f}°, Yaw={yaw:+6.2f}°")
+            print(f"  Robot Euler(Isaac): Roll={robot_roll:+6.2f}°, Pitch={robot_pitch:+6.2f}°")
             print(f"  Gyro  (角速度)    : X={isaac_gyro[0]:+5.2f}, Y={isaac_gyro[1]:+5.2f}, Z={isaac_gyro[2]:+5.2f} rad/s")
             print(f"  Accel (含重力)    : X={accel_g[0]:+5.2f}, Y={accel_g[1]:+5.2f}, Z={accel_g[2]:+5.2f} g")
             print(f"  Accel (去重力净值): X={a_lin_m_s2[0]:+5.2f}, Y={a_lin_m_s2[1]:+5.2f}, Z={a_lin_m_s2[2]:+5.2f} m/s²")

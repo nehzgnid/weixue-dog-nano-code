@@ -132,17 +132,15 @@ class ObsBuilder:
             np.ndarray shape=(48,), float32, 原始量纲，未归一化
         """
         # ── [6:9]  projected_gravity (body frame) ──────────────────────────
-        # Fix WT61C Euler angle sign conventions relative to standard gravity projection
-        roll_rad  = -state["imu_roll"]  * (np.pi / 180.0)
-        pitch_rad = -state["imu_pitch"] * (np.pi / 180.0)
+        # 【核心修正】先统一坐标系，再做物理运算
+        # 根据配置文件 (Y朝前, X朝右)，需要将欧拉角重映射到机体坐标系:
+        # IMU Roll  (绕X/右侧旋转) -> 对应机体 Pitch (抬/低头)
+        # IMU Pitch (绕Y/前向旋转) -> 对应机体 -Roll  (左右倾侧，右侧倒为正，在Isaac左手定则下需取反)
+        robot_roll_rad  = -state["imu_pitch"] * (np.pi / 180.0)
+        robot_pitch_rad = state["imu_roll"] * (np.pi / 180.0)
         
-        # 1. 计算 IMU 坐标系下的重力投影 (g_imu)
-        g_imu = self._projected_gravity(roll_rad, pitch_rad)
-        
-        # 2. 将 g_imu 重映射到机器人机体坐标系 (与 imu_accel 的映射完全一致)
-        projected_gravity = np.array(
-            [g_imu[i] for i in self.imu_axis_remap], dtype=np.float32
-        ) * self.imu_axis_sign
+        # 在统一后的 Isaac Lab 坐标系下直接解算重力投影
+        projected_gravity = self._projected_gravity(robot_roll_rad, robot_pitch_rad)
 
         # ── [0:3]  base_lin_vel (m/s, body frame) ──────────────────────────
         base_lin_vel = self._estimate_lin_vel(state, dt, projected_gravity)
