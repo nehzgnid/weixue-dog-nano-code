@@ -132,8 +132,9 @@ class ObsBuilder:
             np.ndarray shape=(48,), float32, 原始量纲，未归一化
         """
         # ── [6:9]  projected_gravity (body frame) ──────────────────────────
-        roll_rad  = state["imu_roll"]  * (np.pi / 180.0)
-        pitch_rad = state["imu_pitch"] * (np.pi / 180.0)
+        # Fix WT61C Euler angle sign conventions relative to standard gravity projection
+        roll_rad  = -state["imu_roll"]  * (np.pi / 180.0)
+        pitch_rad = -state["imu_pitch"] * (np.pi / 180.0)
         
         # 1. 计算 IMU 坐标系下的重力投影 (g_imu)
         g_imu = self._projected_gravity(roll_rad, pitch_rad)
