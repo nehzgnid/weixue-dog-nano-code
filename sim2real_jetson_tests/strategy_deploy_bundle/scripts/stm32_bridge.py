@@ -405,13 +405,13 @@ class STM32Bridge:
         self.imu_roll, self.imu_pitch, self.imu_yaw = imu_vals[6:9]
 
         count = int(data[36])
-        servo_entry_size = 11
+        servo_entry_size = 7
         tail = data[37:]
         max_count = min(count, 12, len(tail) // servo_entry_size)
         for i in range(max_count):
             off = i * servo_entry_size
-            sid, pos_raw, spd_raw_u, load_raw, _curr_raw, _volt_raw, _temp_raw = struct.unpack_from(
-                "<BhHhhBB", tail, off
+            sid, pos_raw, spd_raw_u, load_raw = struct.unpack_from(
+                "<BhHh", tail, off
             )
             idx = int(sid) - 1
             if 0 <= idx < 12:
