@@ -413,6 +413,9 @@ class STM32Bridge:
             sid, pos_raw, spd_raw, load_raw, _curr_raw, _volt_raw, _temp_raw = struct.unpack_from(
                 "<BhhhhBB", tail, off
             )
+            sign = -1 if (spd_raw & 0x8000) else 1      # 提取方向位(bit 15)
+            magnitude = spd_raw & 0x7FFF                    # 提取数值位(bits 0-14)
+            spd_raw = sign * magnitude                     # 得到真实速度值
             idx = int(sid) - 1
             if 0 <= idx < 12:
                 self.servo_positions[idx] = (pos_raw - 2048) * (2 * np.pi / 4096)
