@@ -413,14 +413,8 @@ class STM32Bridge:
             sid, pos_raw, spd_raw_u, load_raw = struct.unpack_from(
                 "<BhHh", tail, off
             )
-            
-            sign = -1 if (spd_raw_u & 0x8000) else 1
-            magnitude = spd_raw_u & 0x7FFF
-            real_spd_raw = sign * magnitude
-            
             idx = int(sid) - 1
             if 0 <= idx < 12:
-                # ST3215 uses sign-magnitude for velocity
                 sign = -1 if (spd_raw_u & 0x8000) else 1
                 magnitude = spd_raw_u & 0x7FFF
                 real_spd_raw = sign * magnitude

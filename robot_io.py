@@ -194,15 +194,15 @@ class RobotIO:
         
         count = payload[36]
         servo_data = payload[37:]
-        # Each servo is 7 bytes: ID(B), Pos(h), Spd(H), Load(h)
-        servo_size = 7
+        # Each servo is 11 bytes: ID(1), Pos(2), Spd(2), Load(2), Current(2), Voltage(1), Temp(1)
+        servo_size = 11
         if len(servo_data) < count * servo_size: return
         
         new_states = {}
         for i in range(count):
             base = i * servo_size
             chunk = servo_data[base : base + servo_size]
-            sid, pos, spd_u, load = struct.unpack('<BhHh', chunk)
+            sid, pos, spd_u, load, current, voltage, temp = struct.unpack('<BhHhHbB', chunk)
             
             # ST3215 uses sign-magnitude for velocity
             sign = -1 if (spd_u & 0x8000) else 1
@@ -213,9 +213,9 @@ class RobotIO:
                 'pos': pos,
                 'spd': real_spd,
                 'load': load,
-                'current': 0,
-                'voltage': 0,
-                'temp': 0
+                'current': current,
+                'voltage': voltage,
+                'temp': temp
             }
         
         with self.lock:
