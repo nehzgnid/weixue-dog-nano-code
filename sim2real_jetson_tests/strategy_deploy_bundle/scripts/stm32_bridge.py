@@ -374,8 +374,8 @@ class STM32Bridge:
 
         [0:36]  9×float32: [accel(3), gyro(3), euler(3)]
         [36]    uint8: servo_count
-        [37:]   servo_count×7 bytes: <B h H h>
-                id, pos_raw, spd_raw, load_raw
+        [37:]   servo_count×11 bytes: <B h h h h B B>
+                id, pos_raw, spd_raw, load_raw, current_raw, volt_raw, temp_raw
 
         兼容回退：若 payload 长度为 132 字节，也支持旧版 33×float32 格式。
         """
@@ -405,22 +405,21 @@ class STM32Bridge:
         self.imu_roll, self.imu_pitch, self.imu_yaw = imu_vals[6:9]
 
         count = int(data[36])
-        servo_entry_size = 7
+        servo_entry_size = 11
         tail = data[37:]
         max_count = min(count, 12, len(tail) // servo_entry_size)
         for i in range(max_count):
             off = i * servo_entry_size
-            sid, pos_raw, spd_raw_u, load_raw = struct.unpack_from(
-                "<BhHh", tail, off
+            sid, pos_raw, spd_raw, load_raw, _curr_raw, _volt_raw, _temp_raw = struct.unpack_from(
+                "<BhhhhBB", tail, off
             )
+            sign = -1 if (spd_raw & 0x8000) else 1      # 提取方向位(bit 15)
+            magnitude = spd_raw & 0x7FFF                    # 提取数值位(bits 0-14)
+            spd_raw = sign * magnitude                     # 得到真实速度值
             idx = int(sid) - 1
             if 0 <= idx < 12:
-                sign = -1 if (spd_raw_u & 0x8000) else 1
-                magnitude = spd_raw_u & 0x7FFF
-                real_spd_raw = sign * magnitude
-                
                 self.servo_positions[idx] = (pos_raw - 2048) * (2 * np.pi / 4096)
-                self.servo_velocities[idx] = real_spd_raw * (2 * np.pi / 4096)
+                self.servo_velocities[idx] = spd_raw * (2 * np.pi / 4096)
                 self.servo_loads[idx] = load_raw / 1000.0
 
         self.last_state_time = time.perf_counter()
@@ -436,15 +435,9 @@ class STM32Bridge:
             return
         for i in range(12):
             off = i * 6
-            pos_raw, vel_raw_u, load_raw = struct.unpack_from("<hHh", data, off)
-            
-            # ST3215 uses sign-magnitude for velocity
-            sign = -1 if (vel_raw_u & 0x8000) else 1
-            magnitude = vel_raw_u & 0x7FFF
-            real_vel_raw = sign * magnitude
-            
+            pos_raw, vel_raw, load_raw = struct.unpack_from("<3h", data, off)
             self.servo_positions[i] = (pos_raw - 2048) * (2 * np.pi / 4096)
-            self.servo_velocities[i] = real_vel_raw * (2 * np.pi / 4096)   # 转换系数需按固件确认
+            self.servo_velocities[i] = vel_raw * (2 * np.pi / 4096)   # 转换系数需按固件确认
             self.servo_loads[i] = load_raw / 1000.0
         self.last_state_time = time.perf_counter()
 
