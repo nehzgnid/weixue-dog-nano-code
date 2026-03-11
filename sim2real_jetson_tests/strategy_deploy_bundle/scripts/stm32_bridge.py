@@ -374,8 +374,8 @@ class STM32Bridge:
 
         [0:36]  9×float32: [accel(3), gyro(3), euler(3)]
         [36]    uint8: servo_count
-        [37:]   servo_count×11 bytes: <B h h h h B B>
-                id, pos_raw, spd_raw, load_raw, current_raw, volt_raw, temp_raw
+        [37:]   servo_count×7 bytes: <B h H h>
+                id, pos_raw, spd_raw, load_raw
 
         兼容回退：若 payload 长度为 132 字节，也支持旧版 33×float32 格式。
         """
@@ -413,6 +413,11 @@ class STM32Bridge:
             sid, pos_raw, spd_raw_u, load_raw = struct.unpack_from(
                 "<BhHh", tail, off
             )
+            
+            sign = -1 if (spd_raw_u & 0x8000) else 1
+            magnitude = spd_raw_u & 0x7FFF
+            real_spd_raw = sign * magnitude
+            
             idx = int(sid) - 1
             if 0 <= idx < 12:
                 # ST3215 uses sign-magnitude for velocity

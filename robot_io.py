@@ -194,7 +194,7 @@ class RobotIO:
         
         count = payload[36]
         servo_data = payload[37:]
-        # Each servo is 11 bytes: ID(B), Pos(h), Spd(h), Load(h), Current(h), Volt(B), Temp(B)
+        # Each servo is 7 bytes: ID(B), Pos(h), Spd(H), Load(h)
         servo_size = 7
         if len(servo_data) < count * servo_size: return
         
