@@ -134,7 +134,14 @@ class ObsBuilder:
         # ── [6:9]  projected_gravity (body frame) ──────────────────────────
         roll_rad  = state["imu_roll"]  * (np.pi / 180.0)
         pitch_rad = state["imu_pitch"] * (np.pi / 180.0)
-        projected_gravity = self._projected_gravity(roll_rad, pitch_rad)
+        
+        # 1. 计算 IMU 坐标系下的重力投影 (g_imu)
+        g_imu = self._projected_gravity(roll_rad, pitch_rad)
+        
+        # 2. 将 g_imu 重映射到机器人机体坐标系 (与 imu_accel 的映射完全一致)
+        projected_gravity = np.array(
+            [g_imu[i] for i in self.imu_axis_remap], dtype=np.float32
+        ) * self.imu_axis_sign
 
         # ── [0:3]  base_lin_vel (m/s, body frame) ──────────────────────────
         base_lin_vel = self._estimate_lin_vel(state, dt, projected_gravity)
