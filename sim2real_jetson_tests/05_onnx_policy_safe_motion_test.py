@@ -152,7 +152,7 @@ def main() -> int:
     parser.add_argument("--print-joint-vel", action="store_true", help="打印12维关节速度与位置")
     args = parser.parse_args()
 
-    cmd = np.array([args.cmd_x, args.cmd_y, args.cmd_wz], dtype=np.float32)
+    cmd = np.array([-args.cmd_y, args.cmd_x, args.cmd_wz], dtype=np.float32)  # Fix coordinate mapping: network 0=Right, 1=Forward
     cmd_norm = float(np.linalg.norm(cmd))
     is_zero_cmd = cmd_norm <= float(args.zero_cmd_threshold)
     if np.any(np.abs(cmd) > args.max_cmd):

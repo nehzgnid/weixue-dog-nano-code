@@ -177,8 +177,8 @@ class ServoDriver:
 def main():
     parser = argparse.ArgumentParser(description="WAVEGO Sim2Real 出 (透传STM32)推理")
     parser.add_argument("--config", type=str, default="config/wavego_deploy_config.yaml")
-    parser.add_argument("--cmd-x",  type=float, default=0, help="前进速度 m/s")
-    parser.add_argument("--cmd-y",  type=float, default=0.2, help="侧移速度 m/s")
+    parser.add_argument("--cmd-x",  type=float, default=0.2, help="前进速度 m/s")
+    parser.add_argument("--cmd-y",  type=float, default=0.0, help="侧移速度 m/s")
     parser.add_argument("--cmd-wz", type=float, default=0.0, help="转向 rad/s")
     parser.add_argument("--duration", type=float, default=5.0, help="运行时长 (秒)")
     parser.add_argument("--dry-run", action="store_true", help="只推理不发指令")
@@ -215,12 +215,12 @@ def main():
     print_every   = int(args.print_every if args.print_every is not None else cfg["debug"]["print_every"])
     cfg_print_joint_vel = bool(cfg.get("debug", {}).get("print_joint_vel", True))
     print_joint_vel = cfg_print_joint_vel if args.print_joint_vel is None else args.print_joint_vel
-    command       = np.array([args.cmd_x, args.cmd_y, args.cmd_wz], dtype=np.float32)
+    command       = np.array([-args.cmd_y, args.cmd_x, args.cmd_wz], dtype=np.float32)  # Fix coordinate mapping: network 0=Right, 1=Forward
     cfg_alpha     = float(cfg.get("filters", {}).get("action_lpf_alpha", 1.0))
     action_alpha  = float(args.action_lpf_alpha if args.action_lpf_alpha is not None else cfg_alpha)
     action_alpha  = max(0.0, min(1.0, action_alpha))
 
-    print(f"Command: vx={command[0]:.2f} vy={command[1]:.2f} wz={command[2]:.2f}")
+    print(f"Command: vx={args.cmd_x:.2f} (Forward), vy={args.cmd_y:.2f} (Left), wz={args.cmd_wz:.2f} | Net input: {command[0]:.2f}, {command[1]:.2f}")
     print(f"Control: {control_hz} Hz, dt={control_dt*1000:.0f}ms, 时长={args.duration}s")
     print(f"Servo cmd: speed={args.servo_speed}, time_ms={args.servo_time_ms}, init_wait={args.init_wait}s")
     print(f"Action LPF alpha={action_alpha:.2f}")

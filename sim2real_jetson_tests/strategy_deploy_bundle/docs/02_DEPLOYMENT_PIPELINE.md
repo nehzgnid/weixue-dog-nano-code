@@ -86,7 +86,7 @@ python sim2real_test/scripts/stm32_bridge.py --port /dev/ttyACM0 --duration 3
 ```bash
 python sim2real_test/scripts/wavego_inference.py \
   --config config/wavego_deploy_config.yaml \
-  --cmd-x 0 --cmd-y 0.2 --cmd-wz 0 \
+  --cmd-x 0.2 --cmd-y 0 --cmd-wz 0 \
   --duration 5 \
   --dry-run
 ```
