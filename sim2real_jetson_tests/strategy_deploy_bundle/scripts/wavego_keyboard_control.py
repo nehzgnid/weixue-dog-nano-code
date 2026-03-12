@@ -250,8 +250,8 @@ def main():
         use_gpu=not args.no_gpu,
     )
     
-    bridge = RobotIOBridge(cfg_path=cfg_path, port=args.port) if not args.dry_run else None
-    obs_builder = ObsBuilder(cfg, default_mode="deploy")
+    bridge = RobotIOBridge(port=args.port) if not args.dry_run else None
+    obs_builder = ObsBuilder(cfg)
     safety = SharedSafetyGuard(limits_low, limits_high, max_action_delta=0.5)
     
     print(f"Control: {control_hz} Hz, dt={control_dt*1000:.0f}ms")
@@ -277,8 +277,8 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     if bridge:
-        bridge.start()
-        print(f"[INFO] RobotIOBridge 已启动, port={bridge.port}")
+        bridge.connect()
+        print(f"[INFO] RobotIOBridge 已连接, port={bridge.port}")
         time.sleep(args.init_wait)
         bridge.send_servo_targets(obs_builder.DEFAULT_JOINT_POS, speed=args.servo_speed, time_ms=500)
         time.sleep(0.6)
@@ -358,7 +358,7 @@ def main():
         if bridge:
             bridge.send_servo_targets(obs_builder.DEFAULT_JOINT_POS, speed=1000, time_ms=1000)
             time.sleep(1.1)
-            bridge.close()
+            bridge.disconnect()
         print("[INFO] 程序结束")
 
 
