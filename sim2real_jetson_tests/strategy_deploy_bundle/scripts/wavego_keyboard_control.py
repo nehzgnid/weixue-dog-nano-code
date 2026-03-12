@@ -176,7 +176,7 @@ class KeyboardController:
         cmd[1] = np.clip(cmd[1], -MAX_WALK_SPEED, MAX_WALK_SPEED)
         cmd[2] = np.clip(cmd[2], -MAX_ROT_SPEED, MAX_ROT_SPEED)
         
-        return cmd
+        return np.array([-cmd[1], cmd[0], cmd[2]], dtype=np.float32)
     
     def get_status(self) -> dict:
         with self.lock:
@@ -275,9 +275,27 @@ def main():
         use_gpu=not args.no_gpu,
     )
     
-    bridge = RobotIOBridge(port=args.port) if not args.dry_run else None
-    obs_builder = ObsBuilder(cfg)
-    safety = SharedSafetyGuard(limits_low, limits_high, max_action_delta=0.5)
+    bridge = None
+    if not args.dry_run:
+        hw_cfg = cfg["hardware"]
+        port = args.port or hw_cfg["serial_port"]
+        bridge = RobotIOBridge(
+            port=port,
+            baudrate=hw_cfg["serial_baud"],
+        )
+        if not bridge.connect():
+            print(f"[ERROR] 无法连接 STM32，退出。识别描述符: {port}")
+            sys.exit(1)
+    obs_builder = ObsBuilder(cfg.get("observation", {}))
+    safety_cfg = cfg["safety"]
+    safety = SharedSafetyGuard(
+        joint_limits_low=limits_low,
+        joint_limits_high=limits_high,
+        max_action_delta=float(safety_cfg.get("max_action_delta", 0.5)),
+        max_pitch_deg=float(safety_cfg.get("max_pitch_deg", 45.0)),
+        max_roll_deg=float(safety_cfg.get("max_roll_deg", 45.0)),
+        heartbeat_timeout=0.2,
+    )
     
     print(f"Control: {control_hz} Hz, dt={control_dt*1000:.0f}ms")
     print(f"Action LPF alpha={action_alpha:.2f}")
@@ -288,6 +306,7 @@ def main():
     time.sleep(0.5)
     
     action_prev = np.zeros(NUM_ACTIONS, dtype=np.float32)
+    zero_action = np.zeros(NUM_ACTIONS, dtype=np.float32)
     target_prev = None
     step = 0
     t_start = time.perf_counter()
@@ -302,14 +321,18 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     if bridge:
-        bridge.connect()
+        bridge.set_torque(True)
         print(f"[INFO] RobotIOBridge 已连接, port={bridge.port}")
-        time.sleep(args.init_wait)
-        bridge.send_servo_targets(obs_builder.DEFAULT_JOINT_POS, speed=args.servo_speed, time_ms=500)
-        time.sleep(0.6)
+        time.sleep(0.3)
+        zero_targets = obs_builder.action_to_servo_targets(zero_action)
+        bridge.send_servo_targets(zero_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
+        if args.init_wait > 0:
+            time.sleep(args.init_wait)
     
     print("\n[INFO] 开始键盘控制，按键即可控制机器狗！\n")
     
+    obs_builder.reset()
+
     try:
         while running:
             t_loop_start = time.perf_counter()
@@ -383,8 +406,10 @@ def main():
     finally:
         keyboard_controller._restore()
         if bridge:
-            bridge.send_servo_targets(obs_builder.DEFAULT_JOINT_POS, speed=1000, time_ms=1000)
-            time.sleep(1.1)
+            zero_targets = obs_builder.action_to_servo_targets(zero_action)
+            bridge.send_servo_targets(zero_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
+            time.sleep(0.3)
+            bridge.set_torque(False)
             bridge.disconnect()
         print("[INFO] 程序结束")
 
