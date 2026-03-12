@@ -38,9 +38,12 @@ except ImportError:
     print("[WARN] onnxruntime not installed, will use dummy policy")
 
 try:
-    import keyboard
+    import select
+    import tty
+    import termios
+    import sys
 except ImportError:
-    print("[ERROR] keyboard 模块未安装，请运行: pip install keyboard")
+    print("[ERROR] 此脚本需要在 Linux 上运行")
     sys.exit(1)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -67,7 +70,7 @@ ROT_SPEED_INC = 0.05
 
 
 class KeyboardController:
-    """键盘遥控器状态管理"""
+    """键盘遥控器状态管理 - 使用 select + termios 实现非阻塞读取"""
     
     def __init__(self):
         self.lock = Lock()
@@ -79,52 +82,67 @@ class KeyboardController:
         self.base_speed = 0.3
         self.rot_speed = 0.2
         
-        self._pressed_keys = set()
-        self._register_hotkeys()
+        self._old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
     
-    def _register_hotkeys(self):
-        keyboard.add_hotkey('w', self._on_key_press, args=('w',))
-        keyboard.add_hotkey('s', self._on_key_press, args=('s',))
-        keyboard.add_hotkey('a', self._on_key_press, args=('a',))
-        keyboard.add_hotkey('d', self._on_key_press, args=('d',))
-        keyboard.add_hotkey('q', self._on_key_press, args=('q',))
-        keyboard.add_hotkey('e', self._on_key_press, args=('e',))
-        keyboard.add_hotkey('j', self._on_key_press, args=('j',))
-        keyboard.add_hotkey('l', self._on_key_press, args=('l',))
-        keyboard.add_hotkey('u', self._on_key_press, args=('u',))
-        keyboard.add_hotkey('o', self._on_key_press, args=('o',))
-        keyboard.add_hotkey('space', self._on_key_press, args=('space',))
+    def __del__(self):
+        self._restore()
     
-    def _on_key_press(self, key):
+    def _restore(self):
+        try:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_settings)
+        except:
+            pass
+    
+    def _process_key(self, ch):
         with self.lock:
-            if key == 'w':
+            if ch == 'w':
                 self.cmd_x = self.base_speed
-            elif key == 's':
+            elif ch == 's':
                 self.cmd_x = -self.base_speed
-            elif key == 'a':
+            elif ch == 'a':
                 self.cmd_y = self.base_speed
-            elif key == 'd':
+            elif ch == 'd':
                 self.cmd_y = -self.base_speed
-            elif key == 'q':
+            elif ch == 'q':
                 self.base_speed = min(self.base_speed + BASE_SPEED_INC, MAX_WALK_SPEED)
                 self._update_xy()
-            elif key == 'e':
+                print(f"[Speed] 基础速度: {self.base_speed:.1f}")
+            elif ch == 'e':
                 self.base_speed = max(self.base_speed - BASE_SPEED_INC, 0.0)
                 self._update_xy()
-            elif key == 'j':
+                print(f"[Speed] 基础速度: {self.base_speed:.1f}")
+            elif ch == 'j':
                 self.cmd_wz = self.rot_speed
-            elif key == 'l':
+            elif ch == 'l':
                 self.cmd_wz = -self.rot_speed
-            elif key == 'u':
+            elif ch == 'u':
                 self.rot_speed = min(self.rot_speed + ROT_SPEED_INC, MAX_ROT_SPEED)
                 self._update_wz()
-            elif key == 'o':
+                print(f"[Rot] 旋转速度: {self.rot_speed:.2f}")
+            elif ch == 'o':
                 self.rot_speed = max(self.rot_speed - ROT_SPEED_INC, 0.0)
                 self._update_wz()
-            elif key == 'space':
+                print(f"[Rot] 旋转速度: {self.rot_speed:.2f}")
+            elif ch == ' ':
                 self.cmd_x = 0.0
                 self.cmd_y = 0.0
                 self.cmd_wz = 0.0
+                print("[Control] 停止!")
+            elif ch == '1':
+                self.base_speed = 0.1
+                self._update_xy()
+                print(f"[Speed] 慢速模式: {self.base_speed:.1f}")
+            elif ch == '2':
+                self.base_speed = 0.3
+                self._update_xy()
+                print(f"[Speed] 中速模式: {self.base_speed:.1f}")
+            elif ch == '3':
+                self.base_speed = 0.5
+                self._update_xy()
+                print(f"[Speed] 快速模式: {self.base_speed:.1f}")
+            elif ch == '\x03':
+                raise KeyboardInterrupt
     
     def _update_xy(self):
         if self.cmd_x > 0:
@@ -142,6 +160,13 @@ class KeyboardController:
             self.cmd_wz = self.rot_speed
         elif self.cmd_wz < 0:
             self.cmd_wz = -self.rot_speed
+    
+    def check_key(self):
+        """检查是否有键盘输入"""
+        dr, dw, de = select.select([sys.stdin], [], [], 0)
+        if dr:
+            ch = sys.stdin.read(1)
+            self._process_key(ch)
     
     def get_command(self) -> np.ndarray:
         with self.lock:
@@ -289,6 +314,7 @@ def main():
         while running:
             t_loop_start = time.perf_counter()
             
+            keyboard_controller.check_key()
             command = keyboard_controller.get_command()
             status = keyboard_controller.get_status()
             
@@ -355,6 +381,7 @@ def main():
         print("\n[INFO] 键盘中断，退出")
     
     finally:
+        keyboard_controller._restore()
         if bridge:
             bridge.send_servo_targets(obs_builder.DEFAULT_JOINT_POS, speed=1000, time_ms=1000)
             time.sleep(1.1)
