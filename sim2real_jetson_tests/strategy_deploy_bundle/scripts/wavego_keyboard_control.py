@@ -15,11 +15,15 @@ Controls:
 from __future__ import annotations
 
 import argparse
+import glob
+import os
+import select
 import signal
+import struct
 import sys
 import time
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 
 import numpy as np
 import yaml
@@ -45,8 +49,8 @@ try:
     from robotio_bridge import RobotIOBridge
     from safety_guard import SafetyGuard as SharedSafetyGuard
 except ImportError as e:
-    print(f"[ERROR] 导入失败: {e}")
-    print("  请确认 obs_builder.py / robotio_bridge.py / safety_guard.py 可导入")
+    print(f"[ERROR] import failed: {e}")
+    print("  Please ensure obs_builder.py / robotio_bridge.py / safety_guard.py are importable")
     sys.exit(1)
 
 NUM_OBS = 48
@@ -65,51 +69,163 @@ class KeyboardController:
     MOTION_KEYS = ("w", "a", "s", "d", "j", "l")
     ACTION_KEYS = MOTION_KEYS + ("q", "e", "u", "o", "1", "2", "3", "space")
 
-    def __init__(self):
-        if keyboard_lib is None:
-            raise RuntimeError("missing python package `keyboard`")
+    EV_KEY = 0x01
+    INPUT_EVENT = struct.Struct("llHHI")
+    KEY_CODE_TO_NAME = {
+        17: "w",
+        30: "a",
+        31: "s",
+        32: "d",
+        36: "j",
+        38: "l",
+        16: "q",
+        18: "e",
+        22: "u",
+        24: "o",
+        2: "1",
+        3: "2",
+        4: "3",
+        57: "space",
+    }
 
+    def __init__(self):
         self.lock = Lock()
         self.cmd_x = 0.0
         self.cmd_y = 0.0
         self.cmd_wz = 0.0
         self.base_speed = 0.3
         self.rot_speed = 0.2
-        self.message = "按住 WASD / JL 运动，松开即停止"
+        self.message = "Hold WASD / JL to move. Release to stop."
         self.active_keys: set[str] = set()
         self._latched_keys: set[str] = set()
         self._hooks = []
+        self._fds: list[int] = []
+        self._stop_event = Event()
+        self._reader_thread: Thread | None = None
+        self.backend = "uninitialized"
 
-        try:
-            for key in self.ACTION_KEYS:
-                self._hooks.append(
-                    keyboard_lib.on_press_key(
-                        key,
-                        lambda _event, bound_key=key: self._on_press(bound_key),
-                    )
-                )
-                self._hooks.append(
-                    keyboard_lib.on_release_key(
-                        key,
-                        lambda _event, bound_key=key: self._on_release(bound_key),
-                    )
-                )
-        except Exception as exc:
-            self._restore()
-            raise RuntimeError(f"keyboard hook init failed: {exc}") from exc
+        backend_errors: list[str] = []
+
+        if sys.platform.startswith("linux"):
+            try:
+                self._init_linux_input_backend()
+                self.backend = "linux-input"
+                self.message = "Input backend: /dev/input event stream"
+                return
+            except Exception as exc:
+                backend_errors.append(f"linux-input failed: {exc}")
+
+        if keyboard_lib is not None:
+            try:
+                self._init_keyboard_backend()
+                self.backend = "python-keyboard"
+                self.message = "Input backend: python keyboard hooks"
+                return
+            except Exception as exc:
+                backend_errors.append(f"python-keyboard failed: {exc}")
+
+        self._restore()
+        if not backend_errors:
+            backend_errors.append("no keyboard backend available")
+        raise RuntimeError("; ".join(backend_errors))
 
     def __del__(self):
         self._restore()
 
+    def _init_keyboard_backend(self):
+        for key in self.ACTION_KEYS:
+            self._hooks.append(
+                keyboard_lib.on_press_key(
+                    key,
+                    lambda _event, bound_key=key: self._on_press(bound_key),
+                )
+            )
+            self._hooks.append(
+                keyboard_lib.on_release_key(
+                    key,
+                    lambda _event, bound_key=key: self._on_release(bound_key),
+                )
+            )
+
+    def _init_linux_input_backend(self):
+        event_paths = sorted(glob.glob("/dev/input/event*"))
+        if not event_paths:
+            raise RuntimeError("no /dev/input/event* devices found")
+
+        for path in event_paths:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                continue
+            self._fds.append(fd)
+
+        if not self._fds:
+            raise RuntimeError("unable to open any /dev/input/event* device")
+
+        self._reader_thread = Thread(
+            target=self._linux_input_loop,
+            name="wavego-keyboard-reader",
+            daemon=True,
+        )
+        self._reader_thread.start()
+
+    def _linux_input_loop(self):
+        pending = {fd: b"" for fd in self._fds}
+        event_size = self.INPUT_EVENT.size
+
+        while not self._stop_event.is_set():
+            try:
+                ready, _, _ = select.select(self._fds, [], [], 0.1)
+            except (OSError, ValueError):
+                break
+
+            for fd in ready:
+                try:
+                    chunk = os.read(fd, event_size * 32)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    continue
+
+                if not chunk:
+                    continue
+
+                data = pending[fd] + chunk
+                while len(data) >= event_size:
+                    event_raw = data[:event_size]
+                    data = data[event_size:]
+                    _sec, _usec, event_type, code, value = self.INPUT_EVENT.unpack(event_raw)
+                    if event_type != self.EV_KEY:
+                        continue
+                    key_name = self.KEY_CODE_TO_NAME.get(code)
+                    if key_name is None:
+                        continue
+                    if value == 0:
+                        self._on_release(key_name)
+                    elif value in (1, 2):
+                        self._on_press(key_name)
+                pending[fd] = data
+
     def _restore(self):
-        if keyboard_lib is None:
-            return
+        self._stop_event.set()
+
         for hook in self._hooks:
             try:
                 keyboard_lib.unhook(hook)
             except Exception:
                 pass
         self._hooks.clear()
+
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=0.2)
+        self._reader_thread = None
+
+        for fd in self._fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._fds.clear()
 
     def _set_message_locked(self, message: str):
         self.message = message
@@ -144,35 +260,35 @@ class KeyboardController:
             if key == "q":
                 self.base_speed = min(self.base_speed + BASE_SPEED_INC, MAX_WALK_SPEED)
                 self._recompute_motion_locked()
-                self._set_message_locked(f"基础速度调至 {self.base_speed:.1f} m/s")
+                self._set_message_locked(f"Walk speed set to {self.base_speed:.1f} m/s")
             elif key == "e":
                 self.base_speed = max(self.base_speed - BASE_SPEED_INC, 0.0)
                 self._recompute_motion_locked()
-                self._set_message_locked(f"基础速度调至 {self.base_speed:.1f} m/s")
+                self._set_message_locked(f"Walk speed set to {self.base_speed:.1f} m/s")
             elif key == "u":
                 self.rot_speed = min(self.rot_speed + ROT_SPEED_INC, MAX_ROT_SPEED)
                 self._recompute_motion_locked()
-                self._set_message_locked(f"旋转速度调至 {self.rot_speed:.2f} rad/s")
+                self._set_message_locked(f"Turn speed set to {self.rot_speed:.2f} rad/s")
             elif key == "o":
                 self.rot_speed = max(self.rot_speed - ROT_SPEED_INC, 0.0)
                 self._recompute_motion_locked()
-                self._set_message_locked(f"旋转速度调至 {self.rot_speed:.2f} rad/s")
+                self._set_message_locked(f"Turn speed set to {self.rot_speed:.2f} rad/s")
             elif key == "space":
                 self.active_keys.clear()
                 self._recompute_motion_locked()
-                self._set_message_locked("已停止所有运动")
+                self._set_message_locked("All motion stopped")
             elif key == "1":
                 self.base_speed = 0.1
                 self._recompute_motion_locked()
-                self._set_message_locked("切换到慢速模式 0.1 m/s")
+                self._set_message_locked("Walk speed preset: 0.1 m/s")
             elif key == "2":
                 self.base_speed = 0.3
                 self._recompute_motion_locked()
-                self._set_message_locked("切换到中速模式 0.3 m/s")
+                self._set_message_locked("Walk speed preset: 0.3 m/s")
             elif key == "3":
                 self.base_speed = 0.5
                 self._recompute_motion_locked()
-                self._set_message_locked("切换到快速模式 0.5 m/s")
+                self._set_message_locked("Walk speed preset: 0.5 m/s")
 
     def _on_release(self, key: str):
         with self.lock:
@@ -202,6 +318,7 @@ class KeyboardController:
                 "rot_speed": self.rot_speed,
                 "held_keys": " ".join(key.upper() for key in self.MOTION_KEYS if key in self.active_keys) or "-",
                 "message": self.message,
+                "backend": self.backend,
             }
 
 
@@ -267,24 +384,24 @@ class TerminalStatusPanel:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="WAVEGO 键盘遥控模式")
+    parser = argparse.ArgumentParser(description="WAVEGO keyboard teleop mode")
     parser.add_argument("--config", type=str, default="config/wavego_deploy_config.yaml")
-    parser.add_argument("--dry-run", action="store_true", help="只推理不发指令")
-    parser.add_argument("--no-gpu", action="store_true", help="强制 CPU 推理")
-    parser.add_argument("--port", type=str, default=None, help="覆盖串口设备")
-    parser.add_argument("--servo-speed", type=int, default=3400, help="舵机速度参数")
-    parser.add_argument("--servo-time-ms", type=int, default=120, help="舵机插值时间 ms")
-    parser.add_argument("--init-wait", type=float, default=1.0, help="初始站姿等待时间(秒)")
-    parser.add_argument("--action-lpf-alpha", type=float, default=None, help="动作低通 alpha(0~1)")
-    parser.add_argument("--print-every", type=int, default=20, help="保留参数，状态面板改为固定刷新")
-    parser.add_argument("--print-joint-vel", action="store_true", help="在状态面板中显示关节速度数组")
+    parser.add_argument("--dry-run", action="store_true", help="run policy only, do not send commands")
+    parser.add_argument("--no-gpu", action="store_true", help="force CPU inference")
+    parser.add_argument("--port", type=str, default=None, help="override serial device")
+    parser.add_argument("--servo-speed", type=int, default=3400, help="servo speed parameter")
+    parser.add_argument("--servo-time-ms", type=int, default=120, help="servo interpolation time in ms")
+    parser.add_argument("--init-wait", type=float, default=1.0, help="initial stand wait time in seconds")
+    parser.add_argument("--action-lpf-alpha", type=float, default=None, help="action low-pass alpha (0~1)")
+    parser.add_argument("--print-every", type=int, default=20, help="kept for compatibility; status is refreshed in place")
+    parser.add_argument("--print-joint-vel", action="store_true", help="show joint velocity array in the status panel")
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = Path(__file__).parent.parent / cfg_path
     if not cfg_path.exists():
-        print(f"[ERROR] 配置文件不存在: {cfg_path}")
+        print(f"[ERROR] config file not found: {cfg_path}")
         sys.exit(1)
 
     with open(cfg_path) as f:
@@ -321,7 +438,7 @@ def main():
             baudrate=hw_cfg["serial_baud"],
         )
         if not bridge.connect():
-            print(f"[ERROR] 无法连接 STM32，退出。识别描述符: {port_text}")
+            print(f"[ERROR] unable to connect to STM32: {port_text}")
             sys.exit(1)
 
     obs_builder = ObsBuilder(cfg.get("observation", {}))
@@ -338,8 +455,8 @@ def main():
     try:
         keyboard_controller = KeyboardController()
     except RuntimeError as exc:
-        print(f"[ERROR] 键盘监听初始化失败: {exc}")
-        print("  请先 `pip install keyboard`，并在 Linux 上以 root 或具备 input 设备访问权限的用户运行。")
+        print(f"[ERROR] keyboard listener init failed: {exc}")
+        print("  On Linux, run with permission to read /dev/input/event* (root or input group).")
         sys.exit(1)
 
     time.sleep(0.2)
@@ -350,7 +467,7 @@ def main():
     step = 0
     t_start = time.perf_counter()
     running = True
-    shutdown_reason = "正常退出"
+    shutdown_reason = "normal exit"
 
     def clip_action_to_joint_limits(raw_action: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         target_pos_isaac = obs_builder.DEFAULT_JOINT_POS + raw_action * action_scale
@@ -360,7 +477,7 @@ def main():
 
     def signal_handler(_sig, _frame):
         nonlocal running, shutdown_reason
-        shutdown_reason = "收到退出信号，正在停止"
+        shutdown_reason = "received exit signal, stopping"
         keyboard_controller.set_message(shutdown_reason)
         running = False
 
@@ -375,20 +492,20 @@ def main():
         bridge.send_servo_targets(zero_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
         if args.init_wait > 0:
             time.sleep(args.init_wait)
-        keyboard_controller.set_message("站姿初始化完成，可以开始遥控")
+        keyboard_controller.set_message("stand pose initialized; teleop ready")
 
     obs_builder.reset()
 
     panel = TerminalStatusPanel()
     header_lines = [
         "WAVEGO Keyboard Teleop",
-        "=" * 64,
-        "按住 W/S 前后，按住 A/D 左右，按住 J/L 旋转，松开即停止",
-        "Q/E 调整行走速度，U/O 调整旋转速度，1/2/3 速度档位，Space 急停，Ctrl+C 退出",
-        f"模式: {'DRY-RUN' if args.dry_run else 'HARDWARE'} | 端口: {port_text} | 控制频率: {control_hz} Hz | dt: {control_dt*1000:.0f} ms",
-        f"动作低通 alpha: {action_alpha:.2f} | 舵机 speed={args.servo_speed} time_ms={args.servo_time_ms}",
-        f"速度上限: walk={MAX_WALK_SPEED:.2f} m/s | rot={MAX_ROT_SPEED:.2f} rad/s",
-        "-" * 64,
+        "=" * 72,
+        "Hold W/S to move forward/back, hold A/D to move left/right, hold J/L to turn, release to stop",
+        "Q/E adjust walk speed, U/O adjust turn speed, 1/2/3 speed presets, Space stop, Ctrl+C exit",
+        f"Mode: {'DRY-RUN' if args.dry_run else 'HARDWARE'} | Port: {port_text} | Control: {control_hz} Hz | dt: {control_dt*1000:.0f} ms",
+        f"LPF alpha: {action_alpha:.2f} | Servo speed={args.servo_speed} time_ms={args.servo_time_ms}",
+        f"Limits: walk={MAX_WALK_SPEED:.2f} m/s | rot={MAX_ROT_SPEED:.2f} rad/s | Input backend={keyboard_controller.backend}",
+        "-" * 72,
     ]
     panel.start(header_lines)
 
@@ -404,14 +521,14 @@ def main():
         elapsed = now - t_start
         hz_avg = step / elapsed if elapsed > 0 else 0.0
         lines = [
-            f"状态    : {'EMERGENCY' if safety.is_emergency else 'RUNNING'} | 步数={step} | 运行={elapsed:6.1f}s | 平均频率={hz_avg:5.1f} Hz | 回路={last_loop_ms:5.1f} ms",
-            f"按键    : {status['held_keys']:<12} | 提示: {status['message']}",
-            f"命令    : vx={status['cmd_x']:+.2f} m/s | vy={status['cmd_y']:+.2f} m/s | wz={status['cmd_wz']:+.2f} rad/s | net=({command[0]:+.2f}, {command[1]:+.2f}, {command[2]:+.2f})",
-            f"速度档  : walk={status['base_speed']:.2f} m/s | rot={status['rot_speed']:.2f} rad/s | |a|={last_action_mag:.3f} | max|Δtarget|={last_tgt_jump}",
-            f"姿态    : roll={last_roll_deg:+5.1f} deg | pitch={last_pitch_deg:+5.1f} deg",
+            f"State   : {'EMERGENCY' if safety.is_emergency else 'RUNNING'} | steps={step} | elapsed={elapsed:6.1f}s | avg_hz={hz_avg:5.1f} | loop={last_loop_ms:5.1f} ms",
+            f"Keys    : {status['held_keys']:<12} | backend={status['backend']:<14} | note: {status['message']}",
+            f"Command : vx={status['cmd_x']:+.2f} m/s | vy={status['cmd_y']:+.2f} m/s | wz={status['cmd_wz']:+.2f} rad/s | net=({command[0]:+.2f}, {command[1]:+.2f}, {command[2]:+.2f})",
+            f"Speeds  : walk={status['base_speed']:.2f} m/s | rot={status['rot_speed']:.2f} rad/s | |a|={last_action_mag:.3f} | max|dtarget|={last_tgt_jump}",
+            f"Attitude: roll={last_roll_deg:+5.1f} deg | pitch={last_pitch_deg:+5.1f} deg",
         ]
         if args.print_joint_vel:
-            lines.append(f"关节速度: {last_vel_text}")
+            lines.append(f"JointVel: {last_vel_text}")
         panel.update(lines)
 
     initial_now = time.perf_counter()
@@ -450,7 +567,7 @@ def main():
             pitch_deg = float(np.degrees(np.arctan2(-gx, np.sqrt(gy**2 + gz**2))))
             target_pos_isaac, is_safe = safety.check_and_clip(target_pos_isaac, roll_deg, pitch_deg)
             if not is_safe:
-                shutdown_reason = f"异常急停: {safety.emergency_reason}"
+                shutdown_reason = f"emergency stop: {safety.emergency_reason}"
                 keyboard_controller.set_message(shutdown_reason)
                 running = False
                 continue
@@ -482,7 +599,7 @@ def main():
                 time.sleep(sleep_time)
 
     except KeyboardInterrupt:
-        shutdown_reason = "键盘中断，正在退出"
+        shutdown_reason = "keyboard interrupt, exiting"
         keyboard_controller.set_message(shutdown_reason)
 
     finally:
@@ -498,7 +615,7 @@ def main():
         final_status = keyboard_controller.get_status()
         final_command = keyboard_controller.get_command()
         render_status(time.perf_counter(), final_status, final_command)
-        panel.close([f"退出: {shutdown_reason}"])
+        panel.close([f"Exit: {shutdown_reason}"])
 
 
 if __name__ == "__main__":
