@@ -21,7 +21,9 @@ import select
 import signal
 import struct
 import sys
+import termios
 import time
+import tty
 from pathlib import Path
 from threading import Event, Lock, Thread
 
@@ -61,6 +63,7 @@ MAX_ROT_SPEED = 0.5
 BASE_SPEED_INC = 0.1
 ROT_SPEED_INC = 0.05
 STATUS_REFRESH_DT = 0.1
+TTY_REPEAT_TIMEOUT_S = 0.60
 
 
 class KeyboardController:
@@ -98,33 +101,34 @@ class KeyboardController:
         self.message = "Hold WASD / JL to move. Release to stop."
         self.active_keys: set[str] = set()
         self._latched_keys: set[str] = set()
+        self._motion_seen_at: dict[str, float] = {}
+
         self._hooks = []
         self._fds: list[int] = []
         self._stop_event = Event()
         self._reader_thread: Thread | None = None
+        self._stdin_fd: int | None = None
+        self._stdin_termios = None
         self.backend = "uninitialized"
 
         backend_errors: list[str] = []
-
-        if sys.platform.startswith("linux"):
+        for backend_name in self._backend_order():
             try:
-                self._init_linux_input_backend()
-                self.backend = "linux-input"
-                self.message = "Input backend: /dev/input event stream"
+                if backend_name == "tty-stdin":
+                    self._init_tty_backend()
+                elif backend_name == "linux-input":
+                    self._init_linux_input_backend()
+                elif backend_name == "python-keyboard":
+                    self._init_keyboard_backend()
+                else:
+                    continue
+                self.backend = backend_name
+                self.message = f"Input backend: {backend_name}"
                 return
             except Exception as exc:
-                backend_errors.append(f"linux-input failed: {exc}")
+                backend_errors.append(f"{backend_name} failed: {exc}")
+                self._restore()
 
-        if keyboard_lib is not None:
-            try:
-                self._init_keyboard_backend()
-                self.backend = "python-keyboard"
-                self.message = "Input backend: python keyboard hooks"
-                return
-            except Exception as exc:
-                backend_errors.append(f"python-keyboard failed: {exc}")
-
-        self._restore()
         if not backend_errors:
             backend_errors.append("no keyboard backend available")
         raise RuntimeError("; ".join(backend_errors))
@@ -132,7 +136,55 @@ class KeyboardController:
     def __del__(self):
         self._restore()
 
+    @staticmethod
+    def _running_in_container() -> bool:
+        return os.path.exists("/.dockerenv") or bool(os.environ.get("container"))
+
+    def _backend_order(self) -> list[str]:
+        forced = os.environ.get("WAVEGO_KEYBOARD_BACKEND", "auto").strip().lower()
+        valid = {"auto", "tty", "linux-input", "python-keyboard"}
+        if forced not in valid:
+            forced = "auto"
+
+        if forced == "tty":
+            return ["tty-stdin"]
+        if forced == "linux-input":
+            return ["linux-input"]
+        if forced == "python-keyboard":
+            return ["python-keyboard"]
+
+        prefers_tty = sys.stdin.isatty() and (
+            self._running_in_container() or os.environ.get("TERM_PROGRAM", "").lower() == "vscode"
+        )
+        if prefers_tty:
+            return ["tty-stdin", "linux-input", "python-keyboard"]
+        return ["linux-input", "tty-stdin", "python-keyboard"]
+
+    def _init_tty_backend(self):
+        if not sys.stdin.isatty():
+            raise RuntimeError("stdin is not a TTY")
+
+        fd = sys.stdin.fileno()
+        old_attr = termios.tcgetattr(fd)
+        new_attr = termios.tcgetattr(fd)
+        new_attr[3] &= ~(termios.ICANON | termios.ECHO)
+        new_attr[6][termios.VMIN] = 0
+        new_attr[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSADRAIN, new_attr)
+
+        self._stdin_fd = fd
+        self._stdin_termios = old_attr
+        self._reader_thread = Thread(
+            target=self._tty_input_loop,
+            name="wavego-tty-reader",
+            daemon=True,
+        )
+        self._reader_thread.start()
+
     def _init_keyboard_backend(self):
+        if keyboard_lib is None:
+            raise RuntimeError("python package `keyboard` not installed")
+
         for key in self.ACTION_KEYS:
             self._hooks.append(
                 keyboard_lib.on_press_key(
@@ -148,6 +200,9 @@ class KeyboardController:
             )
 
     def _init_linux_input_backend(self):
+        if not sys.platform.startswith("linux"):
+            raise RuntimeError("linux-input backend only works on Linux")
+
         event_paths = sorted(glob.glob("/dev/input/event*"))
         if not event_paths:
             raise RuntimeError("no /dev/input/event* devices found")
@@ -164,10 +219,40 @@ class KeyboardController:
 
         self._reader_thread = Thread(
             target=self._linux_input_loop,
-            name="wavego-keyboard-reader",
+            name="wavego-linux-input-reader",
             daemon=True,
         )
         self._reader_thread.start()
+
+    def _tty_input_loop(self):
+        assert self._stdin_fd is not None
+        while not self._stop_event.is_set():
+            try:
+                ready, _, _ = select.select([self._stdin_fd], [], [], 0.05)
+            except (OSError, ValueError):
+                break
+
+            now = time.monotonic()
+            if ready:
+                try:
+                    data = os.read(self._stdin_fd, 64)
+                except BlockingIOError:
+                    data = b""
+                except OSError:
+                    break
+
+                for value in data:
+                    if value == 3:
+                        signal.raise_signal(signal.SIGINT)
+                        continue
+                    if value in (10, 13):
+                        continue
+                    ch = chr(value).lower()
+                    mapped = "space" if ch == " " else ch
+                    if mapped in self.ACTION_KEYS:
+                        self._on_press(mapped)
+
+            self._expire_tty_motion_keys(now)
 
     def _linux_input_loop(self):
         pending = {fd: b"" for fd in self._fds}
@@ -227,6 +312,14 @@ class KeyboardController:
                 pass
         self._fds.clear()
 
+        if self._stdin_fd is not None and self._stdin_termios is not None:
+            try:
+                termios.tcsetattr(self._stdin_fd, termios.TCSADRAIN, self._stdin_termios)
+            except Exception:
+                pass
+        self._stdin_fd = None
+        self._stdin_termios = None
+
     def _set_message_locked(self, message: str):
         self.message = message
 
@@ -246,14 +339,32 @@ class KeyboardController:
         self.cmd_y = self.base_speed if left and not right else -self.base_speed if right and not left else 0.0
         self.cmd_wz = self.rot_speed if turn_left and not turn_right else -self.rot_speed if turn_right and not turn_left else 0.0
 
+    def _expire_tty_motion_keys(self, now: float):
+        if self.backend != "tty-stdin":
+            return
+
+        with self.lock:
+            expired = [
+                key for key in list(self.active_keys)
+                if key in self.MOTION_KEYS and (now - self._motion_seen_at.get(key, 0.0)) > TTY_REPEAT_TIMEOUT_S
+            ]
+            if not expired:
+                return
+            for key in expired:
+                self.active_keys.discard(key)
+                self._motion_seen_at.pop(key, None)
+            self._recompute_motion_locked()
+
     def _on_press(self, key: str):
+        now = time.monotonic()
         with self.lock:
             if key in self.MOTION_KEYS:
                 self.active_keys.add(key)
+                self._motion_seen_at[key] = now
                 self._recompute_motion_locked()
                 return
 
-            if key in self._latched_keys:
+            if self.backend != "tty-stdin" and key in self._latched_keys:
                 return
             self._latched_keys.add(key)
 
@@ -275,6 +386,7 @@ class KeyboardController:
                 self._set_message_locked(f"Turn speed set to {self.rot_speed:.2f} rad/s")
             elif key == "space":
                 self.active_keys.clear()
+                self._motion_seen_at.clear()
                 self._recompute_motion_locked()
                 self._set_message_locked("All motion stopped")
             elif key == "1":
@@ -294,6 +406,7 @@ class KeyboardController:
         with self.lock:
             if key in self.MOTION_KEYS:
                 self.active_keys.discard(key)
+                self._motion_seen_at.pop(key, None)
                 self._recompute_motion_locked()
             else:
                 self._latched_keys.discard(key)
@@ -456,7 +569,7 @@ def main():
         keyboard_controller = KeyboardController()
     except RuntimeError as exc:
         print(f"[ERROR] keyboard listener init failed: {exc}")
-        print("  On Linux, run with permission to read /dev/input/event* (root or input group).")
+        print("  In Docker/VSCode terminals this should use tty-stdin. If it still fails, check TTY availability and /dev/input permissions.")
         sys.exit(1)
 
     time.sleep(0.2)
@@ -522,7 +635,7 @@ def main():
         hz_avg = step / elapsed if elapsed > 0 else 0.0
         lines = [
             f"State   : {'EMERGENCY' if safety.is_emergency else 'RUNNING'} | steps={step} | elapsed={elapsed:6.1f}s | avg_hz={hz_avg:5.1f} | loop={last_loop_ms:5.1f} ms",
-            f"Keys    : {status['held_keys']:<12} | backend={status['backend']:<14} | note: {status['message']}",
+            f"Keys    : {status['held_keys']:<12} | backend={status['backend']:<10} | note: {status['message']}",
             f"Command : vx={status['cmd_x']:+.2f} m/s | vy={status['cmd_y']:+.2f} m/s | wz={status['cmd_wz']:+.2f} rad/s | net=({command[0]:+.2f}, {command[1]:+.2f}, {command[2]:+.2f})",
             f"Speeds  : walk={status['base_speed']:.2f} m/s | rot={status['rot_speed']:.2f} rad/s | |a|={last_action_mag:.3f} | max|dtarget|={last_tgt_jump}",
             f"Attitude: roll={last_roll_deg:+5.1f} deg | pitch={last_pitch_deg:+5.1f} deg",
