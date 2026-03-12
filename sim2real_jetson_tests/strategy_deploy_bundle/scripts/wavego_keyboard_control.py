@@ -311,6 +311,12 @@ def main():
     step = 0
     t_start = time.perf_counter()
     running = True
+
+    def clip_action_to_joint_limits(raw_action: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        target_pos_isaac = obs_builder.DEFAULT_JOINT_POS + raw_action * action_scale
+        target_pos_isaac = np.clip(target_pos_isaac, limits_low, limits_high)
+        corrected = (target_pos_isaac - obs_builder.DEFAULT_JOINT_POS) / action_scale
+        return target_pos_isaac, corrected
     
     def signal_handler(sig, frame):
         nonlocal running
@@ -324,7 +330,8 @@ def main():
         bridge.set_torque(True)
         print(f"[INFO] RobotIOBridge 已连接, port={bridge.port}")
         time.sleep(0.3)
-        zero_targets = obs_builder.action_to_servo_targets(zero_action)
+        _, zero_corrected = clip_action_to_joint_limits(zero_action)
+        zero_targets = obs_builder.action_to_servo_targets(zero_corrected)
         bridge.send_servo_targets(zero_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
         if args.init_wait > 0:
             time.sleep(args.init_wait)
@@ -356,8 +363,7 @@ def main():
             action_cmd = action_alpha * action_raw + (1.0 - action_alpha) * action_prev
             action_prev = action_cmd.copy()
             
-            target_pos_isaac = obs_builder.DEFAULT_JOINT_POS + action_cmd * action_scale
-            target_pos_isaac = np.clip(target_pos_isaac, limits_low, limits_high)
+            target_pos_isaac, corrected = clip_action_to_joint_limits(action_cmd)
             
             gx, gy, gz = obs_raw[6:9]
             roll_deg = float(np.degrees(np.arctan2(gy, -gz)))
@@ -368,13 +374,12 @@ def main():
                 print(f"[EMERGENCY] 异常急停! reason={safety.emergency_reason}")
                 break
             
+            corrected = (target_pos_isaac - obs_builder.DEFAULT_JOINT_POS) / action_scale
             if not args.dry_run:
-                corrected = (target_pos_isaac - obs_builder.DEFAULT_JOINT_POS) / action_scale
                 servo_targets = obs_builder.action_to_servo_targets(corrected)
                 bridge.send_servo_targets(servo_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
             else:
-                obs_builder.last_action = action_cmd.copy()
-                servo_targets = obs_builder.action_to_servo_targets(action_cmd)
+                servo_targets = obs_builder.action_to_servo_targets(corrected)
             
             target_prev = servo_targets.copy()
             step += 1
@@ -406,7 +411,8 @@ def main():
     finally:
         keyboard_controller._restore()
         if bridge:
-            zero_targets = obs_builder.action_to_servo_targets(zero_action)
+            _, zero_corrected = clip_action_to_joint_limits(zero_action)
+            zero_targets = obs_builder.action_to_servo_targets(zero_corrected)
             bridge.send_servo_targets(zero_targets, speed=args.servo_speed, time_ms=args.servo_time_ms)
             time.sleep(0.3)
             bridge.set_torque(False)
