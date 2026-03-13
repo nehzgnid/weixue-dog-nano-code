@@ -186,7 +186,7 @@ def main():
     parser.add_argument("--log-csv", type=str, default=None)
     parser.add_argument("--port",   type=str, default=None, help="覆盖串口设备")
     parser.add_argument("--servo-speed", type=int, default=3400, help="舵机速度参数")
-    parser.add_argument("--servo-time-ms", type=int, default=120, help="舵机插值时间ms")
+    parser.add_argument("--servo-time-ms", type=int, default=30, help="舵机插值时间ms")
     parser.add_argument("--init-wait", type=float, default=1.0, help="初始站姿等待时间(秒)")
     parser.add_argument("--action-lpf-alpha", type=float, default=None, help="动作低通alpha(0~1)，默认读取配置")
     parser.add_argument("--print-every", type=int, default=None, help="日志打印步数间隔，默认读取配置")
@@ -312,6 +312,7 @@ def main():
     step        = 0
     action_prev = np.zeros(12, dtype=np.float32)
     target_prev = None
+    expected_servo_ids = tuple(range(1, 13))
 
     try:
         while running and step < total_steps:
@@ -326,7 +327,18 @@ def main():
                 "timestamp": time.perf_counter(),
             }
 
-            if not args.dry_run and (time.perf_counter() - state["timestamp"] > 0.2):
+            if not args.dry_run:
+                state_age = time.perf_counter() - state["timestamp"]
+                servo_count = int(state.get("servo_count", 0))
+                servo_ids = tuple(state.get("servo_ids", ()))
+                if state_age > 0.2:
+                    print(f"[EMERGENCY] STM32 state timeout: {state_age:.3f}s")
+                    break
+                if servo_count != 12 or servo_ids != expected_servo_ids:
+                    print(f"[EMERGENCY] incomplete servo state: count={servo_count}, ids={servo_ids}")
+                    break
+
+            if False:  # Disabled: stale-state is now a hard-stop condition above.
                 if step % print_every == 0:
                     print("[WARN] STM32 状态超过 200ms 未更新，检查固件回传频率/协议格式")
 

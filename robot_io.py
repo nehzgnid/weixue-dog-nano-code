@@ -22,6 +22,7 @@ class RobotIO:
         self.running = False
         self.thread = None
         self.last_rx_time = 0.0
+        self.last_rl_state_time = 0.0
         
         # Shared State
         self.imu_data = {
@@ -32,6 +33,8 @@ class RobotIO:
             'accel': [0.0, 0.0, 0.0],
         }
         self.servo_states = {} # id -> {pos, spd, load}
+        self.servo_count = 0
+        self.servo_ids = []
         self.lock = threading.Lock()
         
         # Connect automatically if port is not specified
@@ -165,11 +168,13 @@ class RobotIO:
                 time.sleep(0.1)
 
     def _process_packet(self, pkt_type, payload):
-        self.last_rx_time = time.perf_counter()
+        now = time.perf_counter()
+        self.last_rx_time = now
         if pkt_type == FB_TYPE_SENSOR_IMU:
             self._parse_imu(payload)
         elif pkt_type == FB_TYPE_RL_STATE:
-            self._parse_rl_state(payload)
+            if self._parse_rl_state(payload):
+                self.last_rl_state_time = now
 
     def _parse_imu(self, payload):
         if len(payload) < 36: return
@@ -190,13 +195,15 @@ class RobotIO:
 
     def _parse_rl_state(self, payload):
         self._parse_imu(payload)
-        if len(payload) < 37: return
+        if len(payload) < 37:
+            return False
         
         count = payload[36]
         servo_data = payload[37:]
         # Each servo is 11 bytes: ID(1), Pos(2), Spd(2), Load(2), Current(2), Voltage(1), Temp(1)
         servo_size = 11
-        if len(servo_data) < count * servo_size: return
+        if len(servo_data) < count * servo_size:
+            return False
         
         new_states = {}
         for i in range(count):
@@ -219,4 +226,7 @@ class RobotIO:
             }
         
         with self.lock:
-            self.servo_states.update(new_states)
+            self.servo_states = new_states
+            self.servo_count = len(new_states)
+            self.servo_ids = sorted(new_states.keys())
+        return True

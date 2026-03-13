@@ -503,7 +503,7 @@ def main():
     parser.add_argument("--no-gpu", action="store_true", help="force CPU inference")
     parser.add_argument("--port", type=str, default=None, help="override serial device")
     parser.add_argument("--servo-speed", type=int, default=3400, help="servo speed parameter")
-    parser.add_argument("--servo-time-ms", type=int, default=120, help="servo interpolation time in ms")
+    parser.add_argument("--servo-time-ms", type=int, default=30, help="servo interpolation time in ms")
     parser.add_argument("--init-wait", type=float, default=1.0, help="initial stand wait time in seconds")
     parser.add_argument("--action-lpf-alpha", type=float, default=None, help="action low-pass alpha (0~1)")
     parser.add_argument("--print-every", type=int, default=20, help="kept for compatibility; status is refreshed in place")
@@ -581,6 +581,7 @@ def main():
     t_start = time.perf_counter()
     running = True
     shutdown_reason = "normal exit"
+    expected_servo_ids = tuple(range(1, 13))
 
     def clip_action_to_joint_limits(raw_action: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         target_pos_isaac = obs_builder.DEFAULT_JOINT_POS + raw_action * action_scale
@@ -665,6 +666,21 @@ def main():
                 "imu_accel": np.zeros(3, dtype=np.float32),
                 "timestamp": time.perf_counter(),
             }
+
+            if not args.dry_run:
+                state_age = time.perf_counter() - state["timestamp"]
+                servo_count = int(state.get("servo_count", 0))
+                servo_ids = tuple(state.get("servo_ids", ()))
+                if state_age > 0.2:
+                    shutdown_reason = f"state timeout: {state_age:.3f}s"
+                    keyboard_controller.set_message(shutdown_reason)
+                    running = False
+                    continue
+                if servo_count != 12 or servo_ids != expected_servo_ids:
+                    shutdown_reason = f"incomplete servo state: count={servo_count}, ids={servo_ids}"
+                    keyboard_controller.set_message(shutdown_reason)
+                    running = False
+                    continue
 
             obs_raw = obs_builder.build_observation(state, command, control_dt)
             obs_norm = normalizer.normalize(obs_raw)

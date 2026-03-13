@@ -56,12 +56,16 @@ class RobotIOBridge:
                 "imu_yaw": 0.0,
                 "imu_gyro": np.zeros(3, dtype=np.float32),
                 "imu_accel": np.zeros(3, dtype=np.float32),
+                "servo_count": 0,
+                "servo_ids": tuple(),
                 "timestamp": 0.0,
             }
 
         imu = self.io.get_imu()
         with self.io.lock:
             states = dict(self.io.servo_states)
+            servo_count = int(getattr(self.io, "servo_count", len(states)))
+            servo_ids = tuple(getattr(self.io, "servo_ids", sorted(states.keys())))
 
         servo_pos = np.zeros(12, dtype=np.float32)
         servo_vel = np.zeros(12, dtype=np.float32)
@@ -80,7 +84,7 @@ class RobotIOBridge:
         imu_gyro = np.array(imu.get("gyro", [0.0, 0.0, 0.0]), dtype=np.float32)
         imu_accel = np.array(imu.get("accel", [0.0, 0.0, 0.0]), dtype=np.float32)
 
-        rx_ts = float(getattr(self.io, "last_rx_time", 0.0))
+        rx_ts = float(getattr(self.io, "last_rl_state_time", 0.0))
         if rx_ts > 0.0:
             self.last_state_time = rx_ts
         elif self.last_state_time <= 0.0:
@@ -94,5 +98,7 @@ class RobotIOBridge:
             "imu_yaw": imu_yaw,
             "imu_gyro": imu_gyro,
             "imu_accel": imu_accel,
+            "servo_count": servo_count,
+            "servo_ids": servo_ids,
             "timestamp": self.last_state_time,
         }
