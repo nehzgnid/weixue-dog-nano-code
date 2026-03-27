@@ -106,24 +106,17 @@ joints:
   servo_to_policy: [0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11]
 
 # --- 硬件通信 (STM32 USB CDC) ---
-# 架构: Jetson Nano ↔ USB CDC ↔ STM32F407 ↔ USART+DMA ↔ 12× STS3215
-#          Jetson Nano ←────── USB CDC ────── STM32F407 ← UART ← WT61C IMU
 hardware:
   serial_port: "/dev/ttyACM0"   # udev 规则生效后也可使用 /dev/wavego_stm32
   serial_baud: 115200
   serial_timeout: 0.01           # 10ms 读超时
-  # 注意: IMU 通过 STM32 回传，Jetson 上无需 I2C / smbus2
 
 # --- 观测构建 (ObsBuilder 配置) ---
 observation:
   # DFS 舵机 ID 顺序 → Isaac Lab 关节顺序 的索引映射
-  # DFS:   [FL_h, FL_t, FL_c, FR_h, FR_t, FR_c, RL_h, RL_t, RL_c, RR_h, RR_t, RR_c]
-  # Isaac: [FL_h, FR_h, RL_h, RR_h, FL_t, FR_t, RL_t, RR_t, FL_c, FR_c, RL_c, RR_c]
-  # ✅ DFS[0]=FL_h → Isaac[0]; DFS[1]=FL_t → Isaac[4]; DFS[2]=FL_c → Isaac[8] ...
   servo_to_isaac: [0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11]
 
   # 关节方向标志（Isaac 顺序）: +1=与仿真一致, -1=需取反
-  # ⚠️ 必须通过单关节实机激励标定后修改
   joint_direction: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 
   # 零点偏移 (Isaac 顺序, rad): 实机零位弧度 - 仿真零位弧度
@@ -138,13 +131,9 @@ observation:
   base_lin_vel_mode: "zero"
 
   # 关节速度来源：
-  # false(默认) = 用关节位置差分估计（推荐，避免固件速度编码差异引入伪速度）
-  # true         = 使用固件回传 servo_vel（需确认协议单位/符号位）
   use_servo_vel_feedback: false
-  # 当 use_servo_vel_feedback=true 时，超过该阈值视为异常并回退到差分速度
   max_servo_vel_abs: 20.0
 
-  # 串口协议说明仅作提示；最终以当前固件抓包/源码为准
   protocol_note: "default_tx=TYPE+LEN+SUM; rx兼容TYPE+LEN+SUM与LEN+CMD+XOR"
 
 # --- 安全参数 ---
@@ -164,7 +153,7 @@ filters:
 # --- 调试选项 ---
 debug:
   print_every: 50              # 每 N 步打印一次
-  print_joint_vel: true        # 默认打印12维关节速度（可用 --no-print-joint-vel 关闭）
+  print_joint_vel: true        # 默认打印12维关节速度
   log_csv: false               # 是否记录 CSV
   log_csv_path: "logs/real_run.csv"
   dry_run: false               # true = 只推理不发指令
