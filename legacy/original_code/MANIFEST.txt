@@ -1,0 +1,42 @@
+# Legacy backup mapping
+
+[module wrappers]
+balance_controller.py -> common.motion.balance_controller
+gait_generator.py -> common.motion.gait_generator
+kinematics_v5.py -> common.motion.kinematics
+robot_config.py -> common.config.robot_config
+robot_io.py -> common.io.robot_io
+sim2real_jetson_tests/robotio_bridge.py -> common.io.robotio_bridge
+sim2real_jetson_tests/strategy_deploy_bundle/scripts/obs_builder.py -> rl.core.obs_builder
+sim2real_jetson_tests/strategy_deploy_bundle/scripts/safety_guard.py -> rl.core.safety_guard
+sim2real_jetson_tests/strategy_deploy_bundle/scripts/stm32_bridge.py -> common.io.stm32_bridge
+
+[script wrappers]
+control_center_unified.py -> traditional/apps/control_center_unified.py
+main_trot.py -> traditional/apps/main_trot.py
+servo_control_center.py -> traditional/apps/servo_control_center.py
+sim2real_jetson_tests/01_env_check.py -> rl/tests/smoke/01_env_check.py
+sim2real_jetson_tests/02_stm32_state_probe.py -> rl/tests/smoke/02_stm32_state_probe.py
+sim2real_jetson_tests/03_single_servo_safe_test.py -> rl/tests/smoke/03_single_servo_safe_test.py
+sim2real_jetson_tests/04_onnx_latency_smoke_test.py -> rl/tests/smoke/04_onnx_latency_smoke_test.py
+sim2real_jetson_tests/05_onnx_policy_safe_motion_test.py -> rl/tests/smoke/05_onnx_policy_safe_motion_test.py
+sim2real_jetson_tests/strategy_deploy_bundle/scripts/test_latency.py -> rl/tools/test_latency.py
+sim2real_jetson_tests/strategy_deploy_bundle/scripts/wavego_inference.py -> rl/apps/wavego_inference.py
+sim2real_jetson_tests/strategy_deploy_bundle/scripts/wavego_keyboard_control.py -> rl/apps/wavego_keyboard_control.py
+sim2real_jetson_tests/test_imu_alignment.py -> rl/tests/test_imu_alignment.py
+simulation_ik_v5.py -> traditional/simulation/simulation_ik_v5.py
+simulation_step_in_place.py -> traditional/simulation/simulation_step_in_place.py
+simulation_trot_interactive.py -> traditional/simulation/simulation_trot_interactive.py
+simulation_unified.py -> traditional/simulation/simulation_unified.py
+test_latency_linux.py -> common/tools/latency/test_latency_linux.py
+test_led_latency.py -> common/tools/latency/test_led_latency.py
+test_physical_latency.py -> common/tools/latency/test_physical_latency.py
+test_single_leg_step.py -> traditional/tests/test_single_leg_step.py
+test_trot_in_place.py -> traditional/tests/test_trot_in_place.py
+test_walk_in_place.py -> traditional/tests/test_walk_in_place.py
+traditional_control_tests/auto_imu_observation_audit.py -> common/tools/imu/auto_imu_observation_audit.py
+traditional_control_tests/test_imu_readout.py -> common/tools/imu/test_imu_readout.py
+
+[copied config/data]
+config.json
+sim2real_jetson_tests/strategy_deploy_bundle/config/wavego_deploy_config.yaml
