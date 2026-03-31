@@ -4,10 +4,22 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import time
 import math
+import sys
+from pathlib import Path
 
 # 复用现有的运动学库
-from kinematics_v5 import LegKinematics, L1
-from robot_config import cfg
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.motion.kinematics import LegKinematics, L1
+from common.config.robot_config import cfg
 
 LENGTH = cfg.LENGTH
 WIDTH = cfg.WIDTH

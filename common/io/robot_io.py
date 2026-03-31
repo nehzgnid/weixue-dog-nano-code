@@ -3,7 +3,7 @@ import serial.tools.list_ports
 import threading
 import time
 import struct
-from robot_config import cfg
+from ..config.robot_config import cfg
 
 # Protocol Constants
 HEAD_1 = 0xA5

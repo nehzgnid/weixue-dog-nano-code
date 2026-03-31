@@ -1,11 +1,23 @@
 import time
+import sys
+from pathlib import Path
 
 # Modules
-from robot_config import cfg
-from kinematics_v5 import LegKinematics
-from robot_io import RobotIO
-from gait_generator import BezierGait
-from balance_controller import BalanceController
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.config.robot_config import cfg
+from common.motion.kinematics import LegKinematics
+from common.io.robot_io import RobotIO
+from common.motion.gait_generator import BezierGait
+from common.motion.balance_controller import BalanceController
 
 # === Configuration ===
 FREQ = 2.0             # Trot Frequency (Hz)

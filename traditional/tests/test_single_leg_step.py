@@ -1,10 +1,22 @@
 import time
 import math
 import struct
+import sys
+from pathlib import Path
 
 # 复用现有的库
-from robot_config import cfg
-from kinematics_v5 import LegKinematics, OFFSET_HIP, OFFSET_KNEE
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.config.robot_config import cfg
+from common.motion.kinematics import LegKinematics, OFFSET_HIP, OFFSET_KNEE
 
 # === 配置 ===
 PORT = "COM13"  # 请确认你的端口号，如果不确定会自动搜索

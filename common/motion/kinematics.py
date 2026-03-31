@@ -1,5 +1,5 @@
 import numpy as np
-from robot_config import cfg
+from ..config.robot_config import cfg
 
 # === 机器人几何参数 (从配置读取) ===
 L1 = cfg.L1

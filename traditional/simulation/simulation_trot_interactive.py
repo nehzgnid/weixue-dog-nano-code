@@ -3,12 +3,24 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import sys
+from pathlib import Path
 
 # Imports from existing codebase
-from kinematics_v5 import LegKinematics, L1
-from robot_config import cfg
-from gait_generator import BezierGait
-from balance_controller import BalanceController
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.motion.kinematics import LegKinematics, L1
+from common.config.robot_config import cfg
+from common.motion.gait_generator import BezierGait
+from common.motion.balance_controller import BalanceController
 
 LENGTH = cfg.LENGTH
 WIDTH = cfg.WIDTH

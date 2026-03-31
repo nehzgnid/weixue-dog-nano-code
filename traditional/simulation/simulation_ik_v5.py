@@ -2,9 +2,21 @@ import tkinter as tk
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import sys
+from pathlib import Path
 # 引用最新的配置系统
-from kinematics_v5 import LegKinematics, L1, OFFSET_HIP, OFFSET_KNEE
-from robot_config import cfg
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.motion.kinematics import LegKinematics, L1, OFFSET_HIP, OFFSET_KNEE
+from common.config.robot_config import cfg
 
 LENGTH = cfg.LENGTH
 WIDTH = cfg.WIDTH
