@@ -20,6 +20,7 @@ _ensure_repo_root_on_path()
 
 from common.config.robot_config import cfg
 from common.motion.kinematics import LegKinematics, OFFSET_HIP, OFFSET_KNEE
+from common.io.servo_safety import ServoSafetyGuard, build_servo_control_payload
 
 # === 配置 ===
 PORT = os.getenv("WAVEGO_PORT") or ("COM13" if os.name == "nt" else "/dev/ttyACM0")
@@ -45,6 +46,12 @@ class SingleLegTester:
         self.running = True
         self.kinematics = LegKinematics(LEG_NAME)
         self.start_time = 0
+        self.guard = ServoSafetyGuard(
+            enforce_nonzero_timing=True,
+            default_time_ms=30,
+            default_speed=1200,
+            max_step_delta=260,
+        )
         
         self.connect()
         
@@ -97,12 +104,9 @@ class SingleLegTester:
         self.send_raw(CMD_TYPE_TORQUE, bytearray([1 if enable else 0]))
 
     def send_pos(self, servo_data):
-        # servo_data: [(id, pos, spd, acc), ...]
-        count = len(servo_data)
-        payload = bytearray([count])
-        for item in servo_data:
-            sid, pos, spd, acc = item
-            payload.extend(struct.pack('<B h h B', sid, int(pos), int(spd), int(acc)))
+        # servo_data supports both legacy (id,pos,spd,acc) and new (id,pos,time,speed,acc)
+        safe_cmds = self.guard.sanitize_batch(servo_data)
+        payload = build_servo_control_payload(safe_cmds)
         self.send_raw(CMD_TYPE_SERVO_CTRL, payload)
 
     def run(self):

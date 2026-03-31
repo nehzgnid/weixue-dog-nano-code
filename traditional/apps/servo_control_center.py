@@ -1,11 +1,79 @@
-import tkinter as tk
-from tkinter import ttk, scrolledtext
+"""
+servo_control_center.py
+
+用途:
+- 传统舵机调试终端，支持 GUI 模式和无头模式。
+- 当系统没有 tkinter（例如很多 Docker/Server 环境）时，会自动切换无头模式。
+
+快速使用:
+1) GUI 模式（本机有桌面和 tkinter）:
+    python3 traditional/apps/servo_control_center.py
+
+2) 无头模式（显式）:
+    python3 traditional/apps/servo_control_center.py --headless
+
+3) 无头模式 + 指定串口 + 指定运行时长:
+    python3 traditional/apps/servo_control_center.py --headless --port /dev/ttyACM0 --duration 10
+
+4) 无头模式 + 下发固定目标（JSON 字符串）:
+    python3 traditional/apps/servo_control_center.py --headless --torque-on --targets '{"1":2048,"2":1600,"3":2400}'
+
+5) 无头模式 + 目标位姿文件:
+    python3 traditional/apps/servo_control_center.py --headless --torque-on --targets pose.json
+
+常用参数:
+- --headless      强制无头模式
+- --port          串口名（如 /dev/ttyACM0）
+- --duration      运行秒数，0 表示持续运行
+- --tick-hz       主循环频率
+- --log-interval  状态日志打印周期
+- --targets       目标位姿（JSON 字符串或 JSON 文件）
+- --torque-on     启动时上锁
+
+日志解读:
+- latency: 来自 PING 回包的通信延迟，1~5ms 常见且正常。
+- imu=(0,0,0) 且 pos 全 2048 持续不变:
+  常见于尚未收到 RL/IMU 反馈包时的默认显示，不一定代表通信异常。
+  若 latency 正常但状态长期不更新，需检查下位机是否在持续上报 TYPE_RL_STATE(0x40)。
+"""
+
+import argparse
+import json
+try:
+    import tkinter as tk
+    from tkinter import ttk, scrolledtext
+    TK_AVAILABLE = True
+except ModuleNotFoundError:
+    # Allow importing this module in headless environments.
+    class _TkStub:
+        class Tk:
+            pass
+
+    tk = _TkStub()
+    ttk = None
+    scrolledtext = None
+    TK_AVAILABLE = False
 import serial
 import serial.tools.list_ports
 import threading
 import time
 import struct
 from datetime import datetime
+import sys
+from pathlib import Path
+
+
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.io.servo_safety import ServoSafetyGuard, build_servo_control_payload
 
 # === 用户配置 ===
 DISPLAY_SERVO_COUNT = 12 
@@ -28,13 +96,19 @@ class SerialManager(threading.Thread):
         self.port = port
         self.log = log_func
         self.latency_cb = latency_cb
-        self.imu_cb = None 
+        self.imu_cb = imu_cb
         self.latest_imu = None 
         self.ser = None
         self.tx_queue = []
         self.running = True
         self.ping_start_time = 0
         self.has_received_data = False 
+        self.guard = ServoSafetyGuard(
+            enforce_nonzero_timing=True,
+            default_time_ms=30,
+            default_speed=1200,
+            max_step_delta=260,
+        )
         
         try:
             self.ser = serial.Serial(self.port, BAUD_RATE, timeout=0.01, write_timeout=0.1)
@@ -45,11 +119,11 @@ class SerialManager(threading.Thread):
 
     def send_cmd(self, servo_data):
         if not self.ser or not self.running: return
-        count = len(servo_data)
-        payload = bytearray([count])
-        for item in servo_data:
-            sid, pos, spd, acc = item
-            payload.extend(struct.pack('<B h h B', sid, int(pos), int(spd), int(acc)))
+        safe_cmds = self.guard.sanitize_batch(
+            servo_data,
+            feedback_getter=lambda sid: servo_states.get(int(sid), {}).get('pos'),
+        )
+        payload = build_servo_control_payload(safe_cmds)
         self.send_raw(CMD_TYPE_SERVO_CTRL, payload)
 
     def send_torque(self, enable):
@@ -123,10 +197,23 @@ class SerialManager(threading.Thread):
         count = payload[0]
         idx = 1
         for _ in range(count):
-            if idx + 7 > len(payload): break
-            sid, pos, spd, load = struct.unpack('<B h h h', payload[idx:idx+7])
-            idx += 7
-            servo_states[sid] = {'pos': pos, 'speed': spd, 'load': load}
+            if idx + 11 <= len(payload):
+                sid, pos, spd, load, current, voltage, temp = struct.unpack('<B h h h h B B', payload[idx:idx+11])
+                idx += 11
+                servo_states[sid] = {
+                    'pos': pos,
+                    'speed': spd,
+                    'load': load,
+                    'current': current,
+                    'voltage': voltage,
+                    'temp': temp,
+                }
+            elif idx + 7 <= len(payload):
+                sid, pos, spd, load = struct.unpack('<B h h h', payload[idx:idx+7])
+                idx += 7
+                servo_states[sid] = {'pos': pos, 'speed': spd, 'load': load}
+            else:
+                break
         self.has_received_data = True
 
     def parse_imu(self, payload):
@@ -145,12 +232,181 @@ class SerialManager(threading.Thread):
             count = payload[36]
             idx = 37
             for _ in range(count):
-                if idx + 7 > len(payload): break
-                sid, pos, spd, load = struct.unpack('<B h h h', payload[idx:idx+7])
-                idx += 7
-                servo_states[sid] = {'pos': pos, 'speed': spd, 'load': load}
+                if idx + 11 > len(payload): break
+                sid, pos, spd, load, current, voltage, temp = struct.unpack('<B h h h h B B', payload[idx:idx+11])
+                idx += 11
+                servo_states[sid] = {
+                    'pos': pos,
+                    'speed': spd,
+                    'load': load,
+                    'current': current,
+                    'voltage': voltage,
+                    'temp': temp,
+                }
             self.has_received_data = True
         except: pass
+
+
+def _score_port(port_info):
+    device = (port_info.device or "").lower()
+    desc = (port_info.description or "").lower()
+    score = 0
+    if "wavego" in desc or "stm32" in desc:
+        score += 100
+    if "ttyacm" in device:
+        score += 80
+    if "ttyusb" in device:
+        score += 60
+    if "usb" in desc:
+        score += 30
+    if "com" in device:
+        score += 20
+    return score
+
+
+def _auto_select_port(preferred_port=None):
+    ports = list(serial.tools.list_ports.comports())
+    if not ports:
+        return None
+
+    if preferred_port:
+        devices = {p.device for p in ports}
+        if preferred_port in devices:
+            return preferred_port
+
+    return sorted(ports, key=_score_port, reverse=True)[0].device
+
+
+def _parse_targets_arg(targets_arg):
+    if not targets_arg:
+        return {}
+
+    payload_text = targets_arg
+    maybe_file = Path(targets_arg)
+    if maybe_file.exists() and maybe_file.is_file():
+        payload_text = maybe_file.read_text(encoding="utf-8")
+
+    parsed = json.loads(payload_text)
+    targets = {}
+
+    if isinstance(parsed, dict):
+        items = parsed.items()
+        for sid_raw, pos_raw in items:
+            sid = int(sid_raw)
+            if 1 <= sid <= DISPLAY_SERVO_COUNT:
+                targets[sid] = max(0, min(4095, int(pos_raw)))
+        return targets
+
+    if isinstance(parsed, list):
+        for idx, pos_raw in enumerate(parsed, start=1):
+            if idx > DISPLAY_SERVO_COUNT:
+                break
+            targets[idx] = max(0, min(4095, int(pos_raw)))
+        return targets
+
+    raise ValueError("targets must be a JSON object or list")
+
+
+class HeadlessApp:
+    def __init__(
+        self,
+        port=None,
+        duration_sec=0.0,
+        tick_hz=50.0,
+        log_interval_sec=1.0,
+        torque_on_start=False,
+        targets=None,
+    ):
+        self.port = port
+        self.duration_sec = max(0.0, float(duration_sec))
+        self.tick_hz = max(1.0, float(tick_hz))
+        self.tick_dt = 1.0 / self.tick_hz
+        self.log_interval_sec = max(0.1, float(log_interval_sec))
+        self.torque_on_start = bool(torque_on_start)
+        self.targets = dict(targets or {})
+
+        self.serial_mgr = None
+        self.last_latency_ms = None
+
+    def log(self, msg):
+        ts = datetime.now().strftime('%H:%M:%S')
+        print(f"[{ts}] {msg}")
+
+    def on_latency(self, latency_ms):
+        self.last_latency_ms = float(latency_ms)
+
+    def _status_snapshot(self):
+        imu = self.serial_mgr.latest_imu if self.serial_mgr and self.serial_mgr.latest_imu else (0.0, 0.0, 0.0)
+        sample = []
+        for sid in range(1, 5):
+            sample.append(f"{sid}:{servo_states.get(sid, {}).get('pos', '-')}")
+        latency_text = "--" if self.last_latency_ms is None else f"{self.last_latency_ms:.1f}"
+        return f"imu=({imu[0]:.2f},{imu[1]:.2f},{imu[2]:.2f}) latency={latency_text}ms pos[{', '.join(sample)}]"
+
+    def run(self):
+        selected_port = _auto_select_port(self.port)
+        if not selected_port:
+            self.log("[Error] 未找到可用串口设备")
+            return 1
+
+        self.log(f"[Headless] 使用串口: {selected_port}")
+        self.serial_mgr = SerialManager(selected_port, self.log, self.on_latency, None)
+        if not self.serial_mgr.running:
+            return 1
+
+        self.serial_mgr.daemon = True
+        self.serial_mgr.start()
+
+        if self.torque_on_start or self.targets:
+            self.serial_mgr.send_torque(True)
+            mode = "MANUAL"
+        else:
+            self.serial_mgr.send_torque(False)
+            mode = "RELAX"
+
+        self.log(f"[Headless] 已启动，模式={mode}，频率={self.tick_hz:.1f}Hz")
+        if self.targets:
+            self.log(f"[Headless] 固定目标已加载: {len(self.targets)} 路")
+
+        start = time.perf_counter()
+        last_log = 0.0
+
+        try:
+            while True:
+                now = time.perf_counter()
+                elapsed = now - start
+
+                if self.duration_sec > 0 and elapsed >= self.duration_sec:
+                    break
+
+                if mode == "MANUAL" and self.targets:
+                    cmd = []
+                    for sid, pos in sorted(self.targets.items()):
+                        cmd.append((sid, pos, 500, 20))
+                    self.serial_mgr.send_cmd(cmd)
+
+                if now - last_log >= self.log_interval_sec:
+                    self.serial_mgr.send_ping()
+                    self.log(self._status_snapshot())
+                    last_log = now
+
+                time.sleep(self.tick_dt)
+        except KeyboardInterrupt:
+            self.log("[Headless] 捕获 Ctrl+C，准备退出")
+        finally:
+            if self.serial_mgr:
+                try:
+                    self.serial_mgr.send_torque(False)
+                except Exception:
+                    pass
+                self.serial_mgr.running = False
+                if self.serial_mgr.ser:
+                    try:
+                        self.serial_mgr.ser.close()
+                    except Exception:
+                        pass
+            self.log("[Headless] 已退出")
+        return 0
 
 # Global States
 lock = threading.Lock()
@@ -406,4 +662,35 @@ class MainApp(tk.Tk):
         self.after(20, self.control_loop)
 
 if __name__ == "__main__":
-    app = MainApp(); app.mainloop()
+    parser = argparse.ArgumentParser(description="STM32 RL-Ready 调试终端 (支持无头模式)")
+    parser.add_argument("--headless", action="store_true", help="无头模式运行，不启动 Tk GUI")
+    parser.add_argument("--port", default=None, help="串口名，例如 /dev/ttyACM0")
+    parser.add_argument("--duration", type=float, default=0.0, help="无头运行时长(秒)，0 表示持续运行")
+    parser.add_argument("--tick-hz", type=float, default=50.0, help="无头循环频率(Hz)")
+    parser.add_argument("--log-interval", type=float, default=1.0, help="无头状态日志间隔(秒)")
+    parser.add_argument("--targets", default="", help="JSON 字符串或 JSON 文件路径，用于固定目标位姿")
+    parser.add_argument("--torque-on", action="store_true", help="无头启动时上锁")
+    args = parser.parse_args()
+
+    run_headless = args.headless or not TK_AVAILABLE
+    if run_headless:
+        if not TK_AVAILABLE and not args.headless:
+            print("[INFO] 未检测到 tkinter，自动切换到无头模式")
+        try:
+            targets = _parse_targets_arg(args.targets)
+        except Exception as e:
+            print(f"[Error] --targets 解析失败: {e}")
+            raise SystemExit(2)
+
+        app = HeadlessApp(
+            port=args.port,
+            duration_sec=args.duration,
+            tick_hz=args.tick_hz,
+            log_interval_sec=args.log_interval,
+            torque_on_start=args.torque_on,
+            targets=targets,
+        )
+        raise SystemExit(app.run())
+
+    app = MainApp()
+    app.mainloop()

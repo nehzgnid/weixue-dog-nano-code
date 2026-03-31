@@ -4,6 +4,21 @@ import serial
 import serial.tools.list_ports
 import threading
 import statistics
+import sys
+from pathlib import Path
+
+
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.io.servo_safety import ServoSafetyGuard, build_servo_control_payload
 
 # === 配置 ===
 BAUD_RATE = 115200
@@ -27,6 +42,10 @@ class LatencyTesterLinux:
         self.latest_pos = -1
         self.packet_count = 0
         self.lock = threading.Lock()
+        self.guard = ServoSafetyGuard(
+            enforce_nonzero_timing=False,
+            max_step_delta=0,
+        )
         
         self.connect()
         
@@ -105,9 +124,9 @@ class LatencyTesterLinux:
                                 count = payload[36]
                                 idx = 37
                                 for _ in range(count):
-                                    if idx + 7 > len(payload): break
-                                    sid, pos, spd, load = struct.unpack('<B h h h', payload[idx:idx+7])
-                                    idx += 7
+                                    if idx + 11 > len(payload): break
+                                    sid, pos, spd, load, current, voltage, temp = struct.unpack('<B h h h h B B', payload[idx:idx+11])
+                                    idx += 11
                                     if sid == TARGET_ID:
                                         with self.lock:
                                             self.latest_pos = pos
@@ -133,8 +152,8 @@ class LatencyTesterLinux:
         if self.ser: self.ser.write(packet)
 
     def send_pos(self, sid, pos, spd=0, acc=0):
-        payload = bytearray([1])
-        payload.extend(struct.pack('<B h h B', sid, int(pos), int(spd), int(acc)))
+        safe_cmds = self.guard.sanitize_batch([(sid, pos, 0, spd, acc)])
+        payload = build_servo_control_payload(safe_cmds)
         self.send_raw(CMD_TYPE_SERVO_CTRL, payload)
 
     def send_torque(self, enable):

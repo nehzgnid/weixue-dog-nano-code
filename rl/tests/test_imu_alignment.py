@@ -5,15 +5,32 @@ import yaml
 import sys
 from pathlib import Path
 
-# Add the bundle directory to sys.path so we can import stm32_bridge
-BUNDLE_DIR = Path(__file__).parent / "strategy_deploy_bundle"
-sys.path.insert(0, str(BUNDLE_DIR))
 
-from scripts.stm32_bridge import STM32Bridge
-from scripts.obs_builder import ObsBuilder
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            return parent
+    fallback = Path(__file__).resolve().parents[2]
+    if str(fallback) not in sys.path:
+        sys.path.insert(0, str(fallback))
+    return fallback
+
+
+REPO_ROOT = _ensure_repo_root_on_path()
+
+from common.io.stm32_bridge import STM32Bridge
+from rl.core.obs_builder import ObsBuilder
 
 # 1. 加载你的配置
-CONFIG_PATH = BUNDLE_DIR / "config/wavego_deploy_config.yaml"
+CONFIG_PATH = REPO_ROOT / "rl" / "config" / "wavego_deploy_config.yaml"
+if not CONFIG_PATH.exists():
+    CONFIG_PATH = REPO_ROOT / "sim2real_jetson_tests" / "strategy_deploy_bundle" / "config" / "wavego_deploy_config.yaml"
+
+if not CONFIG_PATH.exists():
+    raise FileNotFoundError(f"未找到部署配置文件: {CONFIG_PATH}")
+
 with open(CONFIG_PATH) as f:
     cfg = yaml.safe_load(f)["observation"]
 

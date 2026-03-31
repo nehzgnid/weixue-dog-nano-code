@@ -1,7 +1,32 @@
-import tkinter as tk
+try:
+    import tkinter as tk
+    TK_AVAILABLE = True
+except ModuleNotFoundError:
+    class _TkStub:
+        class Tk:
+            pass
+
+        class Frame:
+            pass
+
+    tk = _TkStub()
+    TK_AVAILABLE = False
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ModuleNotFoundError:
+    plt = None
+    MATPLOTLIB_AVAILABLE = False
+
+if TK_AVAILABLE and MATPLOTLIB_AVAILABLE:
+    try:
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    except Exception:
+        FigureCanvasTkAgg = None
+        MATPLOTLIB_AVAILABLE = False
+else:
+    FigureCanvasTkAgg = None
 import sys
 from pathlib import Path
 # 引用最新的配置系统
@@ -252,5 +277,11 @@ class SimApp(tk.Tk):
         self.canvas.draw()
 
 if __name__ == "__main__":
+    if not TK_AVAILABLE:
+        print("[Error] tkinter 未安装，无法启动 simulation_ik_v5 GUI。请安装 python3-tk 后重试。")
+        raise SystemExit(1)
+    if not MATPLOTLIB_AVAILABLE:
+        print("[Error] matplotlib 未安装，无法启动 simulation_ik_v5 GUI。请安装 python3-matplotlib 后重试。")
+        raise SystemExit(1)
     app = SimApp()
     app.mainloop()

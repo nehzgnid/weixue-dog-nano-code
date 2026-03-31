@@ -20,6 +20,7 @@ _ensure_repo_root_on_path()
 
 from common.config.robot_config import cfg
 from common.motion.kinematics import LegKinematics, OFFSET_HIP, OFFSET_KNEE
+from common.io.servo_safety import ServoSafetyGuard, build_servo_control_payload
 
 # === 配置 ===
 BAUD_RATE = 115200
@@ -96,6 +97,12 @@ class WalkTesterClosedLoop:
         
         self.pid_roll = PID(KP_ROLL, 0, KD_ROLL)
         self.pid_pitch = PID(KP_PITCH, 0, KD_PITCH)
+        self.guard = ServoSafetyGuard(
+            enforce_nonzero_timing=True,
+            default_time_ms=30,
+            default_speed=1200,
+            max_step_delta=260,
+        )
         
         self.connect()
 
@@ -190,11 +197,8 @@ class WalkTesterClosedLoop:
         self.send_raw(CMD_TYPE_TORQUE, bytearray([1 if enable else 0]))
 
     def send_all_pos(self, servo_data_list):
-        count = len(servo_data_list)
-        payload = bytearray([count])
-        for item in servo_data_list:
-            sid, pos, spd, acc = item
-            payload.extend(struct.pack('<B h h B', sid, int(pos), int(spd), int(acc)))
+        safe_cmds = self.guard.sanitize_batch(servo_data_list)
+        payload = build_servo_control_payload(safe_cmds)
         self.send_raw(CMD_TYPE_SERVO_CTRL, payload)
 
     def run(self):

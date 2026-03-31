@@ -3,6 +3,20 @@ import struct
 import serial
 import serial.tools.list_ports
 import sys
+from pathlib import Path
+
+
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.io.servo_safety import ServoSafetyGuard, build_servo_control_payload
 
 # 尝试导入 GPIO 库
 try:
@@ -51,20 +65,21 @@ def run():
     print(f"=== 光学延迟测试 (LED Latency Test) ===")
     print(f"LED: Pin {LED_PIN} | Servo: ID {TARGET_ID}")
     print(f"动作: {REST_POS} -> {MOVE_POS}")
+    guard = ServoSafetyGuard(enforce_nonzero_timing=False, max_step_delta=0)
     
     # === 预先打包数据 (极致同步的关键) ===
     # 构造 "动作" 数据包
-    payload_move = bytearray([1])
-    # ID, Pos, Speed(0=Max), Acc(0=Max)
-    payload_move.extend(struct.pack('<B h h B', TARGET_ID, int(MOVE_POS), 0, 0)) 
+    payload_move = build_servo_control_payload(
+        guard.sanitize_batch([(TARGET_ID, MOVE_POS, 0, 0, 0)])
+    )
     pkt_move = bytearray([HEAD_1, HEAD_2, CMD_TYPE_SERVO_CTRL, len(payload_move)])
     pkt_move.extend(payload_move)
     pkt_move.append(sum(pkt_move) & 0xFF)
     
     # 构造 "复位" 数据包
-    payload_rest = bytearray([1])
-    # ID, Pos, Speed(500), Acc(50) - 慢速复位
-    payload_rest.extend(struct.pack('<B h h B', TARGET_ID, int(REST_POS), 500, 50)) 
+    payload_rest = build_servo_control_payload(
+        guard.sanitize_batch([(TARGET_ID, REST_POS, 0, 500, 50)])
+    )
     pkt_rest = bytearray([HEAD_1, HEAD_2, CMD_TYPE_SERVO_CTRL, len(payload_rest)])
     pkt_rest.extend(payload_rest)
     pkt_rest.append(sum(pkt_rest) & 0xFF)

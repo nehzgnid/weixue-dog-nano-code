@@ -43,11 +43,29 @@ try:
 except Exception:
     yaml = None
 
+
+def _ensure_repo_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            return parent
+    fallback = Path(__file__).resolve().parents[3]
+    if str(fallback) not in sys.path:
+        sys.path.insert(0, str(fallback))
+    return fallback
+
+
+REPO_ROOT = _ensure_repo_root()
+
 # 复用同目录串口读取实现（协议与现有工具一致）
 try:
     from .test_imu_readout import IMUReader
 except Exception:
-    from test_imu_readout import IMUReader
+    try:
+        from common.tools.imu.test_imu_readout import IMUReader
+    except Exception:
+        from test_imu_readout import IMUReader
 
 
 AXIS_NAME = ["X", "Y", "Z"]
@@ -138,13 +156,15 @@ def load_repo_observation_config(config_path: str | None):
     fallback_signs = (1.0, -1.0, 1.0)
 
     if config_path is None:
-        cfg_path = (
-            Path(__file__).resolve().parent.parent
-            / "sim2real_jetson_tests"
-            / "strategy_deploy_bundle"
-            / "config"
-            / "wavego_deploy_config.yaml"
-        )
+        cfg_path = REPO_ROOT / "rl" / "config" / "wavego_deploy_config.yaml"
+        if not cfg_path.exists():
+            cfg_path = (
+                REPO_ROOT
+                / "sim2real_jetson_tests"
+                / "strategy_deploy_bundle"
+                / "config"
+                / "wavego_deploy_config.yaml"
+            )
     else:
         cfg_path = Path(config_path)
 

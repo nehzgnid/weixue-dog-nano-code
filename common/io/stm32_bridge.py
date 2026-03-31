@@ -37,8 +37,26 @@ from __future__ import annotations
 import struct
 import threading
 import time
+import sys
+from pathlib import Path
 
 import numpy as np
+
+
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            return
+
+
+_ensure_repo_root_on_path()
+
+try:
+    from .servo_safety import ServoSafetyGuard, build_servo_control_payload
+except ImportError:
+    from common.io.servo_safety import ServoSafetyGuard, build_servo_control_payload
 
 try:
     import serial
@@ -91,6 +109,10 @@ class STM32Bridge:
         self.tx_packet_format = tx_packet_format
         self.servo_cmd_format = servo_cmd_format
         self.ser: serial.Serial | None = None
+        self.safety_guard = ServoSafetyGuard(
+            enforce_nonzero_timing=False,
+            max_step_delta=0,
+        )
 
         # ── 最新状态缓存 ────────────────────────────────────────────────────
         # 舵机：DFS 顺序 [FL_h, FL_t, FL_c, FR_h, FR_t, FR_c, RL_, RR_]
@@ -163,6 +185,15 @@ class STM32Bridge:
         if not self._is_open():
             return
         target_raw = np.clip(target_raw, 0, 4095).astype(np.int16)
+        clamped = []
+        for idx, raw_pos in enumerate(target_raw.tolist(), start=1):
+            pos = int(raw_pos)
+            hard_limit = self.safety_guard.hard_limits.get(idx)
+            if hard_limit is not None:
+                low, high = hard_limit
+                pos = max(low, min(high, pos))
+            clamped.append(pos)
+        target_raw = np.array(clamped, dtype=np.int16)
 
         if self.servo_cmd_format == "compact12":
             # 旧格式: 12×int16 position + uint16 speed + uint16 time
@@ -173,16 +204,12 @@ class STM32Bridge:
         # 默认 RobotIO 兼容格式:
         # payload = count(1) + N * [sid(1), acc(1), pos(i16), time(u16), speed(u16)]
         # sid: 1..12 (DFS 顺序)
-        count = 12
         u_speed = max(0, min(65535, int(speed)))
         u_time = max(0, min(65535, int(time_ms)))
-        acc = 0
-
-        payload = bytearray([count])
-        for idx, pos in enumerate(target_raw.tolist(), start=1):
-            sid = max(1, min(255, int(idx)))
-            i_pos = max(-32768, min(32767, int(pos)))
-            payload.extend(struct.pack("<B B h H H", sid, acc, i_pos, u_time, u_speed))
+        safe_cmds = self.safety_guard.sanitize_batch(
+            [(idx, pos, u_time, u_speed, 0) for idx, pos in enumerate(target_raw.tolist(), start=1)]
+        )
+        payload = build_servo_control_payload(safe_cmds)
         self._send_packet(CMD_SERVO_CTRL, payload)
 
     def set_torque(self, enable: bool):

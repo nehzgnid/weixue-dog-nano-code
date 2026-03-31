@@ -1,5 +1,20 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, scrolledtext
+    TK_AVAILABLE = True
+except ModuleNotFoundError:
+    class _TkStub:
+        class Tk:
+            pass
+
+        class Frame:
+            pass
+
+    tk = _TkStub()
+    ttk = None
+    messagebox = None
+    scrolledtext = None
+    TK_AVAILABLE = False
 import serial
 import serial.tools.list_ports
 import threading
@@ -1093,5 +1108,8 @@ class UnifiedControlApp(tk.Tk):
         self.log_box.see(tk.END)
 
 if __name__ == "__main__":
+    if not TK_AVAILABLE:
+        print("[Error] tkinter 未安装，无法启动 control_center_unified GUI。请安装 python3-tk 后重试。")
+        raise SystemExit(1)
     app = UnifiedControlApp()
     app.mainloop()

@@ -19,6 +19,7 @@ _ensure_repo_root_on_path()
 
 from common.config.robot_config import cfg
 from common.motion.kinematics import LegKinematics, OFFSET_HIP, OFFSET_KNEE
+from common.io.servo_safety import ServoSafetyGuard, build_servo_control_payload
 
 # === 配置 ===
 BAUD_RATE = 115200
@@ -66,6 +67,12 @@ class TrotTester:
             "FL": 0.0, "RR": 0.0,
             "FR": 0.5, "RL": 0.5
         }
+        self.guard = ServoSafetyGuard(
+            enforce_nonzero_timing=True,
+            default_time_ms=30,
+            default_speed=1200,
+            max_step_delta=260,
+        )
         
         self.connect()
         
@@ -118,12 +125,9 @@ class TrotTester:
         self.send_raw(CMD_TYPE_TORQUE, bytearray([1 if enable else 0]))
 
     def send_all_pos(self, servo_data_list):
-        # servo_data_list: [(id, pos, spd, acc), ...]
-        count = len(servo_data_list)
-        payload = bytearray([count])
-        for item in servo_data_list:
-            sid, pos, spd, acc = item
-            payload.extend(struct.pack('<B h h B', sid, int(pos), int(spd), int(acc)))
+        # servo_data_list supports both legacy (id,pos,spd,acc) and new (id,pos,time,speed,acc)
+        safe_cmds = self.guard.sanitize_batch(servo_data_list)
+        payload = build_servo_control_payload(safe_cmds)
         self.send_raw(CMD_TYPE_SERVO_CTRL, payload)
 
     def run(self):

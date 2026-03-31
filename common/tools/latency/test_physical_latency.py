@@ -4,6 +4,21 @@ import serial
 import serial.tools.list_ports
 import threading
 import statistics
+import sys
+from pathlib import Path
+
+
+def _ensure_repo_root_on_path():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
+
+from common.io.servo_safety import ServoSafetyGuard, build_servo_control_payload
 
 # === 配置 ===
 BAUD_RATE = 115200
@@ -25,6 +40,10 @@ class PhysicalLatencyTester:
         self.lock = threading.Lock()
         self.latest_acc_z = 0.0
         self.base_acc_z = 1.0 # 重力 G
+        self.guard = ServoSafetyGuard(
+            enforce_nonzero_timing=False,
+            max_step_delta=0,
+        )
         
         self.connect()
         
@@ -76,9 +95,8 @@ class PhysicalLatencyTester:
             except: pass
 
     def send_pos(self, sid, pos, spd=2000, acc=100):
-        # 极速发送指令
-        payload = bytearray([1])
-        payload.extend(struct.pack('<B h h B', sid, int(pos), int(spd), int(acc)))
+        safe_cmds = self.guard.sanitize_batch([(sid, pos, 0, spd, acc)])
+        payload = build_servo_control_payload(safe_cmds)
         pkt = bytearray([HEAD_1, HEAD_2, CMD_TYPE_SERVO_CTRL, len(payload)])
         pkt.extend(payload)
         pkt.append(sum(pkt) & 0xFF)

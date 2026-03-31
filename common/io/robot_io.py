@@ -5,6 +5,11 @@ import time
 import struct
 import os
 from ..config.robot_config import cfg
+from .servo_safety import (
+    ServoSafetyGuard,
+    build_servo_control_payload,
+    split_servo_batches,
+)
 
 # Protocol Constants
 HEAD_1 = 0xA5
@@ -15,6 +20,16 @@ CMD_TYPE_TORQUE = 0x11
 CMD_TYPE_REQUEST_STATE = 0x30
 FB_TYPE_SENSOR_IMU = 0x30
 FB_TYPE_RL_STATE = 0x40
+
+
+def _env_int(name, default):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
 class RobotIO:
     def __init__(self, port=None, baud_rate=115200):
@@ -38,6 +53,15 @@ class RobotIO:
         self.servo_count = 0
         self.servo_ids = []
         self.lock = threading.Lock()
+
+        self.safety_guard = ServoSafetyGuard(
+            enforce_nonzero_timing=(os.getenv("WAVEGO_ENFORCE_SAFE_TIMING", "1") != "0"),
+            default_time_ms=_env_int("WAVEGO_SAFE_TIME_MS", 30),
+            default_speed=_env_int("WAVEGO_SAFE_SPEED", 1200),
+            max_speed=_env_int("WAVEGO_SAFE_MAX_SPEED", 3400),
+            max_time_ms=_env_int("WAVEGO_SAFE_MAX_TIME_MS", 2000),
+            max_step_delta=_env_int("WAVEGO_MAX_STEP_DELTA", 260),
+        )
         
         # Connect automatically if port is not specified
         if not self.port:
@@ -115,6 +139,8 @@ class RobotIO:
         try:
             payload = bytearray([1 if enable else 0])
             self._send_packet(CMD_TYPE_TORQUE, payload)
+            if not enable:
+                self.safety_guard.reset_history()
         except Exception as e:
             print(f"[RobotIO] Send Torque Error: {e}")
 
@@ -135,43 +161,25 @@ class RobotIO:
             print(f"[RobotIO] Request State Error: {e}")
 
     def send_servos(self, servo_data_list):
-        if not self.ser: return
+        if not self.ser or not servo_data_list:
+            return
         try:
-            count = len(servo_data_list)
-            payload = bytearray([count])
-            for item in servo_data_list:
-                # New Protocol: ID(1), Acc(1), Pos(2), Time(2), Speed(2) = 8 bytes total
-                if len(item) == 5:
-                    # (id, pos, time, speed, acc)
-                    sid, pos, time_val, spd, acc = item
-                else:
-                    # Backward compatibility for (id, pos, spd, acc)
-                    sid, pos, spd, acc = item
-                    time_val = 0 
-                
-                # Debug: Check for invalid values before packing
-                if not (0 <= int(sid) <= 255):
-                    print(f"[DEBUG] Invalid SID: {sid} (type: {type(sid)})")
-                if not (0 <= int(acc) <= 255):
-                    print(f"[DEBUG] Invalid ACC: {acc} (type: {type(acc)}, item: {item})")
-                
-                # Format: < (little), B(ID), B(Acc), h(Pos), H(Time), H(Spd)
-                u_sid = max(0, min(255, int(sid)))
-                u_acc = max(0, min(255, int(acc)))
-                calibrated_pos = int(pos) + cfg.get_offset(u_sid)
-                i_pos = max(-32768, min(32767, calibrated_pos))
-                u_time = max(0, min(65535, int(time_val)))
-                u_spd = max(0, min(65535, int(spd)))
-                
-                # CRITICAL FIX: If Time>0 but Speed=0, servo may ignore Time and move instantly!
-                # Auto-correct Speed to max (3400) to ensure Time takes effect.
-                if u_time > 0 and u_spd == 0:
-                    print(f"[WARN] ID {u_sid}: Time={u_time}ms but Speed=0. Speed=0 disables Time mode!")
-                    print(f"[WARN] Auto-setting Speed to 3400 to allow Time-based motion.")
-                    u_spd = 3400  # ST3215 max speed
-                
-                payload.extend(struct.pack('<B B h H H', u_sid, u_acc, i_pos, u_time, u_spd))
-            self._send_packet(CMD_TYPE_SERVO_CTRL, payload)
+            with self.lock:
+                feedback_pos = {
+                    sid: int(state.get('pos'))
+                    for sid, state in self.servo_states.items()
+                    if isinstance(state, dict) and state.get('pos') is not None
+                }
+
+            safe_cmds = self.safety_guard.sanitize_batch(
+                servo_data_list,
+                offset_getter=cfg.get_offset,
+                feedback_getter=lambda sid: feedback_pos.get(sid),
+            )
+
+            for chunk in split_servo_batches(safe_cmds):
+                payload = build_servo_control_payload(chunk)
+                self._send_packet(CMD_TYPE_SERVO_CTRL, payload)
         except Exception as e:
             print(f"[RobotIO] Send Servo Error: {e}")
             print(f"[RobotIO] Debug - First item: {servo_data_list[0] if servo_data_list else 'EMPTY'}")
@@ -179,6 +187,10 @@ class RobotIO:
     def get_imu(self):
         with self.lock:
             return self.imu_data.copy()
+
+    def get_servo_states(self):
+        with self.lock:
+            return {sid: dict(state) for sid, state in self.servo_states.items()}
 
     def _send_packet(self, pkt_type, payload):
         packet = bytearray([HEAD_1, HEAD_2, pkt_type, len(payload)])

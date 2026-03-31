@@ -1,0 +1,57 @@
+[ImportError] common/io/robot_io.py
+ImportError: attempted relative import with no known parent package
+
+[ImportError] common/io/robotio_bridge.py
+ImportError: attempted relative import with no known parent package
+
+[ImportError] common/io/servo_safety.py
+ImportError: attempted relative import with no known parent package
+
+[ImportError] common/io/stm32_bridge.py
+ImportError: attempted relative import with no known parent package
+
+[ImportError] common/motion/kinematics.py
+ImportError: attempted relative import with no known parent package
+
+[ModuleNotFoundError] common/tools/imu/auto_imu_observation_audit.py
+ModuleNotFoundError: No module named 'test_imu_readout'
+
+[RC=1] setup.py
+   or: setup.py --help-commands
+   or: setup.py cmd --help
+
+error: no commands supplied
+
+[ModuleNotFoundError] simulation_ik_v5.py
+ModuleNotFoundError: No module named 'tkinter'
+
+[ModuleNotFoundError] simulation_step_in_place.py
+ModuleNotFoundError: No module named 'tkinter'
+
+[ModuleNotFoundError] simulation_trot_interactive.py
+ModuleNotFoundError: No module named 'tkinter'
+
+[ModuleNotFoundError] simulation_unified.py
+ModuleNotFoundError: No module named 'tkinter'
+
+[RC=1] tempCodeRunnerFile.py
+    exec(code, run_globals)
+  File "/workspace/weixue-dog-nano-code/tempCodeRunnerFile.py", line 1, in <module>
+    control_loop
+NameError: name 'control_loop' is not defined
+
+[ModuleNotFoundError] traditional/apps/control_center_unified.py
+ModuleNotFoundError: No module named 'tkinter'
+
+[ModuleNotFoundError] traditional/simulation/simulation_ik_v5.py
+ModuleNotFoundError: No module named 'tkinter'
+
+[ModuleNotFoundError] traditional/simulation/simulation_step_in_place.py
+ModuleNotFoundError: No module named 'tkinter'
+
+[ModuleNotFoundError] traditional/simulation/simulation_trot_interactive.py
+ModuleNotFoundError: No module named 'tkinter'
+
+[ModuleNotFoundError] traditional/simulation/simulation_unified.py
+ModuleNotFoundError: No module named 'tkinter'
+
