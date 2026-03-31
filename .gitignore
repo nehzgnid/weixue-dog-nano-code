@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .vscode/
 .venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.dep_probe_report.txt
