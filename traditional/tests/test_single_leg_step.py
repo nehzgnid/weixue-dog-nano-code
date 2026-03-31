@@ -2,7 +2,10 @@ import time
 import math
 import struct
 import sys
+import os
 from pathlib import Path
+import serial
+import serial.tools.list_ports
 
 # 复用现有的库
 def _ensure_repo_root_on_path():
@@ -19,7 +22,7 @@ from common.config.robot_config import cfg
 from common.motion.kinematics import LegKinematics, OFFSET_HIP, OFFSET_KNEE
 
 # === 配置 ===
-PORT = "COM13"  # 请确认你的端口号，如果不确定会自动搜索
+PORT = os.getenv("WAVEGO_PORT") or ("COM13" if os.name == "nt" else "/dev/ttyACM0")
 BAUD_RATE = 115200
 LEG_NAME = "FL"
 LEG_ID_OFFSET = 0 # FL=0, FR=3, RL=6, RR=9
@@ -46,18 +49,40 @@ class SingleLegTester:
         self.connect()
         
     def connect(self):
-        # 自动寻找端口
-        import serial.tools.list_ports
         ports = list(serial.tools.list_ports.comports())
-        target_port = "COM13"
-        
+        if not ports:
+            print("连接失败: 未找到任何串口设备")
+            self.running = False
+            return
 
+        devices = {p.device for p in ports}
+        target_port = PORT if PORT in devices else None
+
+        if target_port is None:
+            def score(port_info):
+                device = (port_info.device or "").lower()
+                desc = (port_info.description or "").lower()
+                val = 0
+                if "wavego" in desc or "stm32" in desc:
+                    val += 100
+                if "ttyacm" in device:
+                    val += 80
+                if "ttyusb" in device:
+                    val += 60
+                if "usb" in desc:
+                    val += 30
+                if "com" in device:
+                    val += 20
+                return val
+
+            target_port = sorted(ports, key=score, reverse=True)[0].device
 
         try:
             self.ser = serial.Serial(target_port, BAUD_RATE, timeout=0.01)
             print(f"已连接到 {target_port}")
         except Exception as e:
             print(f"连接失败: {e}")
+            self.ser = None
             self.running = False
 
     def send_raw(self, pkt_type, payload):

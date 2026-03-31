@@ -3,13 +3,16 @@ import serial.tools.list_ports
 import threading
 import time
 import struct
+import os
 from ..config.robot_config import cfg
 
 # Protocol Constants
 HEAD_1 = 0xA5
 HEAD_2 = 0x5A
+CMD_TYPE_HEARTBEAT = 0x01
 CMD_TYPE_SERVO_CTRL = 0x10
 CMD_TYPE_TORQUE = 0x11
+CMD_TYPE_REQUEST_STATE = 0x30
 FB_TYPE_SENSOR_IMU = 0x30
 FB_TYPE_RL_STATE = 0x40
 
@@ -44,11 +47,42 @@ class RobotIO:
 
     def auto_connect(self):
         ports = list(serial.tools.list_ports.comports())
-        candidates = [p.device for p in ports if "USB" in p.description or "COM" in p.device]
-        if candidates:
-            self.connect(candidates[-1])
-        else:
+        if not ports:
             print("[RobotIO] No serial ports found.")
+            return
+
+        # Highest priority: explicit override from environment.
+        env_port = os.getenv("WAVEGO_PORT")
+        if env_port:
+            self.connect(env_port)
+            if self.ser is not None:
+                return
+            print(f"[RobotIO] WAVEGO_PORT={env_port} connect failed, fallback to auto-detect")
+
+        def score(port_info):
+            device = (port_info.device or "").lower()
+            desc = (port_info.description or "").lower()
+            val = 0
+            if "wavego" in desc or "stm32" in desc:
+                val += 100
+            if "ttyacm" in device:
+                val += 80
+            if "ttyusb" in device:
+                val += 60
+            if "usb" in desc:
+                val += 30
+            if "com" in device:
+                val += 20
+            return val
+
+        sorted_ports = sorted(ports, key=score, reverse=True)
+        for p in sorted_ports:
+            self.connect(p.device)
+            if self.ser is not None:
+                return
+
+        all_devices = ", ".join(p.device for p in ports)
+        print(f"[RobotIO] No usable serial ports. Detected: {all_devices}")
 
     def connect(self, port):
         try:
@@ -60,6 +94,7 @@ class RobotIO:
             self.last_rx_time = time.perf_counter()
             print(f"[RobotIO] Connected to {port}")
         except Exception as e:
+            self.ser = None
             print(f"[RobotIO] Connection failed: {e}")
             self.running = False
 
@@ -82,6 +117,22 @@ class RobotIO:
             self._send_packet(CMD_TYPE_TORQUE, payload)
         except Exception as e:
             print(f"[RobotIO] Send Torque Error: {e}")
+
+    def send_heartbeat(self):
+        if not self.ser:
+            return
+        try:
+            self._send_packet(CMD_TYPE_HEARTBEAT, bytearray())
+        except Exception as e:
+            print(f"[RobotIO] Send Heartbeat Error: {e}")
+
+    def request_state(self):
+        if not self.ser:
+            return
+        try:
+            self._send_packet(CMD_TYPE_REQUEST_STATE, bytearray())
+        except Exception as e:
+            print(f"[RobotIO] Request State Error: {e}")
 
     def send_servos(self, servo_data_list):
         if not self.ser: return

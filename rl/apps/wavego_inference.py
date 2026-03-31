@@ -6,15 +6,20 @@ WAVEGO Sim2Real 主推理循环 — Jetson Nano 上运行。
     Jetson Nano ← (USB CDC) ← STM32F407 ← (UART) ← WT61C IMU
 
 用法:
-    # 零指令站立测试（架空机器狗！）
-    python scripts/wavego_inference.py \
-        --config config/wavego_deploy_config.yaml \
-        --cmd-x 0 --cmd-y 0 --cmd-wz 0 --duration 10
+    # 快速自检（推荐先 dry-run，确认模型和配置可加载）
+    python3 -m rl.apps.wavego_inference \
+        --config rl/config/wavego_deploy_config.yaml \
+        --dry-run --duration 2 --no-gpu
 
-    # 慢速前进
-    python scripts/wavego_inference.py \
-        --config config/wavego_deploy_config.yaml \
-        --cmd-x 0.3 --duration 30
+    # 实机低速前进（务必先架空机器狗）
+    python3 -m rl.apps.wavego_inference \
+        --config rl/config/wavego_deploy_config.yaml \
+        --port /dev/ttyACM0 --cmd-x 0.3 --duration 30 --no-gpu
+
+    # 兼容绝对路径直接运行
+    python3 /workspace/weixue-dog-nano-code/rl/apps/wavego_inference.py \
+        --config rl/config/wavego_deploy_config.yaml \
+        --port /dev/ttyACM0 --cmd-x 0.3 --duration 30 --no-gpu
 
 依赖:
     pip install numpy pyserial pyyaml onnxruntime
@@ -31,6 +36,17 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+
+
+def _ensure_repo_root_on_path() -> None:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
 
 try:
     import onnxruntime as ort
@@ -125,11 +141,13 @@ class ONNXPolicy:
             self.output_name = None
             print("[WARN] onnxruntime 不可用，启用 dummy policy（输出全零动作）")
             return
-        providers = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if use_gpu
-            else ["CPUExecutionProvider"]
-        )
+        available = set(ort.get_available_providers())
+        if use_gpu and "CUDAExecutionProvider" in available:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        else:
+            if use_gpu:
+                print("[INFO] CUDAExecutionProvider 不可用，自动回退 CPU 推理")
+            providers = ["CPUExecutionProvider"]
         self.session = ort.InferenceSession(onnx_path, providers=providers)
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
@@ -205,6 +223,8 @@ def main():
     parser.add_argument("--servo-speed", type=int, default=3400, help="舵机速度参数")
     parser.add_argument("--servo-time-ms", type=int, default=30, help="舵机插值时间ms")
     parser.add_argument("--init-wait", type=float, default=1.0, help="初始站姿等待时间(秒)")
+    parser.add_argument("--state-start-timeout", type=float, default=3.0, help="启动阶段等待首帧完整状态包的超时(秒)")
+    parser.add_argument("--state-timeout", type=float, default=0.2, help="运行阶段状态超时阈值(秒)")
     parser.add_argument("--action-lpf-alpha", type=float, default=None, help="动作低通alpha(0~1)，默认读取配置")
     parser.add_argument("--print-every", type=int, default=None, help="日志打印步数间隔，默认读取配置")
     parser.add_argument("--verbose-debug", action="store_true", help="打印更多连续性诊断信息")
@@ -238,6 +258,7 @@ def main():
     print(f"Command: vx={args.cmd_x:.2f} (Forward), vy={args.cmd_y:.2f} (Left), wz={args.cmd_wz:.2f} | Net input: {command[0]:.2f}, {command[1]:.2f}")
     print(f"Control: {control_hz} Hz, dt={control_dt*1000:.0f}ms, 时长={args.duration}s")
     print(f"Servo cmd: speed={args.servo_speed}, time_ms={args.servo_time_ms}, init_wait={args.init_wait}s")
+    print(f"State gate: start_timeout={args.state_start_timeout:.1f}s, runtime_timeout={args.state_timeout:.3f}s")
     print(f"Action LPF alpha={action_alpha:.2f}")
     print(f"Joint vel print: {'ON' if print_joint_vel else 'OFF'}")
     if np.all(np.abs(command) < 1e-6):
@@ -330,10 +351,23 @@ def main():
     action_prev = np.zeros(12, dtype=np.float32)
     target_prev = None
     expected_servo_ids = tuple(range(1, 13))
+    state_ready = bool(args.dry_run)
+    state_start_deadline = time.perf_counter() + args.state_start_timeout
+    last_state_wait_log_ts = 0.0
+    last_request_ts = 0.0
+    last_heartbeat_ts = 0.0
 
     try:
         while running and step < total_steps:
             t_loop_start = time.perf_counter()
+
+            if not args.dry_run:
+                if (t_loop_start - last_request_ts) >= control_dt:
+                    bridge.request_state()
+                    last_request_ts = t_loop_start
+                if (t_loop_start - last_heartbeat_ts) >= 0.5:
+                    bridge.send_heartbeat()
+                    last_heartbeat_ts = t_loop_start
 
             # --- 1. 读取 STM32 最新状态（默认依赖持续回传流） ---
             state = bridge.get_state() if not args.dry_run else {
@@ -345,10 +379,43 @@ def main():
             }
 
             if not args.dry_run:
-                state_age = time.perf_counter() - state["timestamp"]
+                now = time.perf_counter()
+                state_ts = float(state.get("timestamp", 0.0))
                 servo_count = int(state.get("servo_count", 0))
                 servo_ids = tuple(state.get("servo_ids", ()))
-                if state_age > 0.2:
+                has_full_state = state_ts > 0.0 and servo_count == 12 and servo_ids == expected_servo_ids
+
+                if not state_ready:
+                    if has_full_state:
+                        state_ready = True
+                        print("[INFO] 已收到首帧完整状态包，进入闭环控制。")
+                    else:
+                        if now >= state_start_deadline:
+                            age_text = "N/A" if state_ts <= 0.0 else f"{(now - state_ts):.3f}s"
+                            print("[ERROR] 启动阶段未收到完整状态包，无法进入闭环控制。")
+                            print(
+                                f"[ERROR] state(ts={state_ts:.3f}, age={age_text}, servo_count={servo_count}, ids={servo_ids})"
+                            )
+                            print("[HINT] 当前链路看起来只有心跳响应，没有 RL 全状态回传。")
+                            print(
+                                "[HINT] 请先运行: python3 rl/tests/smoke/02_stm32_state_probe.py "
+                                "--port /dev/ttyACM0 --duration 5"
+                            )
+                            print("[HINT] 并检查 STM32 固件是否启用 FB_TYPE_RL_STATE(0x40) 周期回传。")
+                            break
+
+                        if (now - last_state_wait_log_ts) >= 1.0:
+                            remain = max(0.0, state_start_deadline - now)
+                            print(
+                                f"[WAIT] 等待状态流... remain={remain:.1f}s "
+                                f"servo_count={servo_count} ids={servo_ids}"
+                            )
+                            last_state_wait_log_ts = now
+                        time.sleep(min(control_dt, 0.05))
+                        continue
+
+                state_age = now - state_ts if state_ts > 0.0 else 1e9
+                if state_age > args.state_timeout:
                     print(f"[EMERGENCY] STM32 state timeout: {state_age:.3f}s")
                     break
                 if servo_count != 12 or servo_ids != expected_servo_ids:

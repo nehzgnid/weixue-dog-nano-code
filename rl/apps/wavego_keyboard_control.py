@@ -1,6 +1,22 @@
 """
 WAVEGO keyboard teleop for policy deployment.
 
+Quick start:
+    # 推荐先 dry-run，确认模型和按键链路
+    python3 -m rl.apps.wavego_keyboard_control \
+        --config rl/config/wavego_deploy_config.yaml \
+        --dry-run --no-gpu
+
+    # 实机键盘遥控（先架空机器狗）
+    python3 -m rl.apps.wavego_keyboard_control \
+        --config rl/config/wavego_deploy_config.yaml \
+        --port /dev/ttyACM0 --no-gpu
+
+    # 兼容绝对路径直接运行
+    python3 /workspace/weixue-dog-nano-code/rl/apps/wavego_keyboard_control.py \
+        --config rl/config/wavego_deploy_config.yaml \
+        --port /dev/ttyACM0 --no-gpu
+
 Controls:
     Hold W/S   - forward / backward
     Hold A/D   - left / right
@@ -28,6 +44,17 @@ from threading import Event, Lock, Thread
 
 import numpy as np
 import yaml
+
+
+def _ensure_repo_root_on_path() -> None:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "MIGRATION_PLAN_SCHEME_B_EXECUTION.md").exists():
+            if str(parent) not in sys.path:
+                sys.path.insert(0, str(parent))
+            break
+
+
+_ensure_repo_root_on_path()
 
 try:
     import onnxruntime as ort
@@ -459,7 +486,13 @@ class ONNXPolicy:
             self.session = None
             return
 
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_gpu else ["CPUExecutionProvider"]
+        available = set(ort.get_available_providers())
+        if use_gpu and "CUDAExecutionProvider" in available:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        else:
+            if use_gpu:
+                print("[INFO] CUDAExecutionProvider unavailable, fallback to CPU")
+            providers = ["CPUExecutionProvider"]
         self.session = ort.InferenceSession(model_path, providers=providers)
         self.inp_name = self.session.get_inputs()[0].name
 
@@ -523,6 +556,8 @@ def main():
     parser.add_argument("--servo-speed", type=int, default=3400, help="servo speed parameter")
     parser.add_argument("--servo-time-ms", type=int, default=30, help="servo interpolation time in ms")
     parser.add_argument("--init-wait", type=float, default=1.0, help="initial stand wait time in seconds")
+    parser.add_argument("--state-start-timeout", type=float, default=3.0, help="timeout waiting for first complete state packet")
+    parser.add_argument("--state-timeout", type=float, default=0.2, help="runtime state timeout threshold in seconds")
     parser.add_argument("--action-lpf-alpha", type=float, default=None, help="action low-pass alpha (0~1)")
     parser.add_argument("--print-every", type=int, default=20, help="kept for compatibility; status is refreshed in place")
     parser.add_argument("--print-joint-vel", action="store_true", help="show joint velocity array in the status panel")
@@ -600,6 +635,11 @@ def main():
     running = True
     shutdown_reason = "normal exit"
     expected_servo_ids = tuple(range(1, 13))
+    state_ready = bool(args.dry_run)
+    state_start_deadline = time.perf_counter() + args.state_start_timeout
+    last_state_wait_log_ts = 0.0
+    last_request_ts = 0.0
+    last_heartbeat_ts = 0.0
 
     def clip_action_to_joint_limits(raw_action: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         target_pos_isaac = obs_builder.DEFAULT_JOINT_POS + raw_action * action_scale
@@ -636,6 +676,7 @@ def main():
         "Q/E adjust walk speed, U/O adjust turn speed, 1/2/3 speed presets, Space stop, Ctrl+C exit",
         f"Mode: {'DRY-RUN' if args.dry_run else 'HARDWARE'} | Port: {port_text} | Control: {control_hz} Hz | dt: {control_dt*1000:.0f} ms",
         f"LPF alpha: {action_alpha:.2f} | Servo speed={args.servo_speed} time_ms={args.servo_time_ms}",
+        f"State gate: start_timeout={args.state_start_timeout:.1f}s | runtime_timeout={args.state_timeout:.3f}s",
         f"Limits: walk={MAX_WALK_SPEED:.2f} m/s | rot={MAX_ROT_SPEED:.2f} rad/s | Input backend={keyboard_controller.backend}",
         "-" * 72,
     ]
@@ -671,6 +712,14 @@ def main():
         while running:
             t_loop_start = time.perf_counter()
 
+            if not args.dry_run:
+                if (t_loop_start - last_request_ts) >= control_dt:
+                    bridge.request_state()
+                    last_request_ts = t_loop_start
+                if (t_loop_start - last_heartbeat_ts) >= 0.5:
+                    bridge.send_heartbeat()
+                    last_heartbeat_ts = t_loop_start
+
             command = keyboard_controller.get_command()
             status = keyboard_controller.get_status()
 
@@ -686,10 +735,38 @@ def main():
             }
 
             if not args.dry_run:
-                state_age = time.perf_counter() - state["timestamp"]
+                now = time.perf_counter()
+                state_ts = float(state.get("timestamp", 0.0))
                 servo_count = int(state.get("servo_count", 0))
                 servo_ids = tuple(state.get("servo_ids", ()))
-                if state_age > 0.2:
+                has_full_state = state_ts > 0.0 and servo_count == 12 and servo_ids == expected_servo_ids
+
+                if not state_ready:
+                    if has_full_state:
+                        state_ready = True
+                        keyboard_controller.set_message("first complete state received; teleop running")
+                    else:
+                        if now >= state_start_deadline:
+                            age_text = "N/A" if state_ts <= 0.0 else f"{(now - state_ts):.3f}s"
+                            shutdown_reason = (
+                                "startup state timeout: no complete RL state stream "
+                                f"(age={age_text}, servo_count={servo_count}, ids={servo_ids})"
+                            )
+                            keyboard_controller.set_message(shutdown_reason)
+                            running = False
+                            continue
+
+                        if (now - last_state_wait_log_ts) >= 1.0:
+                            remain = max(0.0, state_start_deadline - now)
+                            keyboard_controller.set_message(
+                                f"waiting state stream... remain={remain:.1f}s count={servo_count}"
+                            )
+                            last_state_wait_log_ts = now
+                        time.sleep(min(control_dt, 0.05))
+                        continue
+
+                state_age = now - state_ts if state_ts > 0.0 else 1e9
+                if state_age > args.state_timeout:
                     shutdown_reason = f"state timeout: {state_age:.3f}s"
                     keyboard_controller.set_message(shutdown_reason)
                     running = False

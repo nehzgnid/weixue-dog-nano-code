@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import time
-
 import numpy as np
 
 from .robot_io import RobotIO
@@ -19,7 +17,7 @@ class RobotIOBridge:
         self.io = RobotIO(port=self.port, baud_rate=self.baudrate)
         ok = self.io.ser is not None
         if ok:
-            self.last_state_time = time.perf_counter()
+            self.last_state_time = 0.0
         return ok
 
     def disconnect(self):
@@ -29,6 +27,14 @@ class RobotIOBridge:
     def set_torque(self, enable: bool):
         if self.io is not None:
             self.io.send_torque(enable)
+
+    def send_heartbeat(self):
+        if self.io is not None:
+            self.io.send_heartbeat()
+
+    def request_state(self):
+        if self.io is not None:
+            self.io.request_state()
 
     def send_servo_targets(self, target_raw: np.ndarray, speed: int = 3400, time_ms: int = 120):
         if self.io is None:
@@ -40,7 +46,6 @@ class RobotIOBridge:
         self.io.send_servos(cmd)
 
     def get_state(self) -> dict:
-        now = time.perf_counter()
         if self.io is None:
             return {
                 "servo_pos": np.zeros(12, dtype=np.float32),
@@ -79,10 +84,10 @@ class RobotIOBridge:
         imu_accel = np.array(imu.get("accel", [0.0, 0.0, 0.0]), dtype=np.float32)
 
         rx_ts = float(getattr(self.io, "last_rl_state_time", 0.0))
+        if rx_ts <= 0.0:
+            rx_ts = float(getattr(self.io, "last_rx_time", 0.0))
         if rx_ts > 0.0:
             self.last_state_time = rx_ts
-        elif self.last_state_time <= 0.0:
-            self.last_state_time = now
 
         return {
             "servo_pos": servo_pos,

@@ -2,6 +2,7 @@ import time
 import math
 import struct
 import sys
+import os
 from pathlib import Path
 import serial
 import serial.tools.list_ports
@@ -21,6 +22,7 @@ from common.motion.kinematics import LegKinematics, OFFSET_HIP, OFFSET_KNEE
 
 # === 配置 ===
 BAUD_RATE = 115200
+PORT = os.getenv("WAVEGO_PORT") or ("COM13" if os.name == "nt" else "/dev/ttyACM0")
 BODY_HEIGHT = -180.0 # 标准站立高度
 STEP_HEIGHT_TARGET = 40.0 # 目标抬腿高度 (mm)
 FREQ = 2.0 # 步频 (Hz)
@@ -69,18 +71,39 @@ class TrotTester:
         
     def connect(self):
         ports = list(serial.tools.list_ports.comports())
-        target_port = "COM13" # 请根据实际串口修改
-        
-        
-        if target_port:
-            try:
-                self.ser = serial.Serial(target_port, BAUD_RATE, timeout=0.01)
-                print(f"已连接到 {target_port}")
-            except Exception as e:
-                print(f"连接失败: {e}")
-                self.running = False
-        else:
-            print("未找到串口")
+        if not ports:
+            print("连接失败: 未找到任何串口设备")
+            self.running = False
+            return
+
+        devices = {p.device for p in ports}
+        target_port = PORT if PORT in devices else None
+
+        if target_port is None:
+            def score(port_info):
+                device = (port_info.device or "").lower()
+                desc = (port_info.description or "").lower()
+                val = 0
+                if "wavego" in desc or "stm32" in desc:
+                    val += 100
+                if "ttyacm" in device:
+                    val += 80
+                if "ttyusb" in device:
+                    val += 60
+                if "usb" in desc:
+                    val += 30
+                if "com" in device:
+                    val += 20
+                return val
+
+            target_port = sorted(ports, key=score, reverse=True)[0].device
+
+        try:
+            self.ser = serial.Serial(target_port, BAUD_RATE, timeout=0.01)
+            print(f"已连接到 {target_port}")
+        except Exception as e:
+            print(f"连接失败: {e}")
+            self.ser = None
             self.running = False
 
     def send_raw(self, pkt_type, payload):

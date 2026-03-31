@@ -1,6 +1,7 @@
 import time
 import math
 import struct
+import os
 import serial
 import serial.tools.list_ports
 import threading
@@ -22,6 +23,7 @@ from common.motion.kinematics import LegKinematics, OFFSET_HIP, OFFSET_KNEE
 
 # === 配置 ===
 BAUD_RATE = 115200
+PORT = os.getenv("WAVEGO_PORT") or ("COM13" if os.name == "nt" else "/dev/ttyACM0")
 BODY_HEIGHT = -180.0
 STEP_HEIGHT_TARGET = 30.0 
 FREQ = 1.5 
@@ -106,13 +108,30 @@ class WalkTesterClosedLoop:
         print("\n=== 可用串口列表 ===")
         for i, p in enumerate(ports):
             print(f"{i+1}. {p.device} ({p.description})")
-        
-        target_port = None
-        if len(ports) == 1:
-            if input(f"\n连接 {ports[0].device}? [y]: ").lower() != 'n': target_port = ports[0].device
-        else:
-            idx = input("选择序号: ")
-            if idx.isdigit() and 0 < int(idx) <= len(ports): target_port = ports[int(idx)-1].device
+
+        devices = {p.device for p in ports}
+        target_port = PORT if PORT in devices else None
+
+        if target_port is None:
+            def score(port_info):
+                device = (port_info.device or "").lower()
+                desc = (port_info.description or "").lower()
+                val = 0
+                if "wavego" in desc or "stm32" in desc:
+                    val += 100
+                if "ttyacm" in device:
+                    val += 80
+                if "ttyusb" in device:
+                    val += 60
+                if "usb" in desc:
+                    val += 30
+                if "com" in device:
+                    val += 20
+                return val
+
+            target_port = sorted(ports, key=score, reverse=True)[0].device
+
+        print(f"自动选择串口: {target_port}")
 
         if target_port:
             try:
